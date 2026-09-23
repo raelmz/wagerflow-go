@@ -49,6 +49,9 @@ Dado o prazo curto e a falta de experiência prévia em Go, a estratégia de pri
 | Decisão | Escolha | Por quê (resumo) |
 |---|---|---|
 | Representação de `Money` | `int64` em centavos (menor unidade monetária) | Evita totalmente `float32`/`float64` (requisito eliminatório). Mais simples de implementar do que integrar uma lib de precisão decimal, e suficiente para o escopo do desafio (moeda única, BRL). |
+| Máquina de estados de `WagerTransaction` | Métodos de transição (`MarkProcessed`, `MarkPendingReference`, `MarkRejected`, `MarkFailed`) com guard de estado terminal | Nenhuma transação em `PROCESSED`/`REJECTED`/`FAILED` pode mudar de estado de novo — isso é o que garante que um replay/reentrega apenas consulte o resultado já persistido, em vez de reaplicar a operação. |
+| Separação entre `OPENING` (interno) e tipos externos | `NewOpeningTransaction` (uso interno) vs. `NewExternalWagerTransaction` (rejeita `OPENING` explicitamente) | O desafio exige rejeitar `OPENING` vindo de HTTP/SQS. Construtores separados tornam essa regra impossível de esquecer, em vez de uma checagem solta em algum handler. |
+| Validação de `WalletLedgerEntry` no construtor | `NewWalletLedgerEntry` recalcula `balanceBefore ± amount` e compara com `balanceAfter` recebido, rejeitando se não bater | Constrói a garantia de correção matemática do ledger dentro do próprio domínio, não depende de quem chama ter calculado certo. |
 
 ## 5. Limitações conhecidas e trabalho não concluído
 
