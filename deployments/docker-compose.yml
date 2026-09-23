@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: wagerflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: wagerflow
+      POSTGRES_PASSWORD: wagerflow
+      POSTGRES_DB: wagerflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - wagerflow_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagerflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # LocalStack (SQS) e Keycloak (IdP) entram aqui nos próximos passos,
+  # quando implementarmos mensageria e autenticação.
+
+volumes:
+  wagerflow_postgres_data:
