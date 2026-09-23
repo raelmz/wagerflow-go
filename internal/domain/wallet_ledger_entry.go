@@ -23,14 +23,14 @@ var ErrLedgerBalanceMismatch = errors.New("balanceAfter não bate com balanceBef
 // muda (é a garantia de "append-only" que o desafio exige: correções
 // geram um NOVO lançamento, nunca editam um existente).
 type WalletLedgerEntry struct {
-	id             uuid.UUID
-	walletID       uuid.UUID
-	transactionID  uuid.UUID
-	direction      LedgerDirection
-	amount         Money
-	balanceBefore  Money
-	balanceAfter   Money
-	createdAt      time.Time
+	id            uuid.UUID
+	walletID      uuid.UUID
+	transactionID uuid.UUID
+	direction     LedgerDirection
+	amount        Money
+	balanceBefore Money
+	balanceAfter  Money
+	createdAt     time.Time
 }
 
 // NewWalletLedgerEntry cria um lançamento, validando que a
@@ -105,11 +105,11 @@ func RehydrateWalletLedgerEntry(
 
 // --- Getters (sem setters — lançamento é imutável) ---
 
-func (e *WalletLedgerEntry) ID() uuid.UUID                 { return e.id }
-func (e *WalletLedgerEntry) WalletID() uuid.UUID           { return e.walletID }
-func (e *WalletLedgerEntry) TransactionID() uuid.UUID      { return e.transactionID }
-func (e *WalletLedgerEntry) Direction() LedgerDirection    { return e.direction }
-func (e *WalletLedgerEntry) Amount() Money                 { return e.amount }
-func (e *WalletLedgerEntry) BalanceBefore() Money          { return e.balanceBefore }
-func (e *WalletLedgerEntry) BalanceAfter() Money           { return e.balanceAfter }
-func (e *WalletLedgerEntry) CreatedAt() time.Time          { return e.createdAt }
+func (e *WalletLedgerEntry) ID() uuid.UUID              { return e.id }
+func (e *WalletLedgerEntry) WalletID() uuid.UUID        { return e.walletID }
+func (e *WalletLedgerEntry) TransactionID() uuid.UUID   { return e.transactionID }
+func (e *WalletLedgerEntry) Direction() LedgerDirection { return e.direction }
+func (e *WalletLedgerEntry) Amount() Money              { return e.amount }
+func (e *WalletLedgerEntry) BalanceBefore() Money       { return e.balanceBefore }
+func (e *WalletLedgerEntry) BalanceAfter() Money        { return e.balanceAfter }
+func (e *WalletLedgerEntry) CreatedAt() time.Time       { return e.createdAt }

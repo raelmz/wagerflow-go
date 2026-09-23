@@ -9,8 +9,8 @@ import (
 
 // Erros específicos da carteira.
 var (
-	ErrInsufficientBalance = errors.New("saldo insuficiente")
-	ErrInvalidPlayerID     = errors.New("playerId inválido")
+	ErrInsufficientBalance    = errors.New("saldo insuficiente")
+	ErrInvalidPlayerID        = errors.New("playerId inválido")
 	ErrWalletCurrencyMismatch = errors.New("a moeda da operação não corresponde à moeda da carteira")
 )
 
@@ -154,10 +154,10 @@ func (w *Wallet) Credit(amount Money) error {
 // Isso impede que outro pacote faça "wallet.balance = ..." direto
 // e quebre a invariante de saldo sem passar por Debit/Credit.
 
-func (w *Wallet) ID() uuid.UUID          { return w.id }
-func (w *Wallet) PlayerID() uuid.UUID    { return w.playerID }
-func (w *Wallet) Currency() string       { return w.currency }
-func (w *Wallet) Balance() Money         { return w.balance }
-func (w *Wallet) Version() int64         { return w.version }
-func (w *Wallet) CreatedAt() time.Time   { return w.createdAt }
-func (w *Wallet) UpdatedAt() time.Time   { return w.updatedAt }
+func (w *Wallet) ID() uuid.UUID        { return w.id }
+func (w *Wallet) PlayerID() uuid.UUID  { return w.playerID }
+func (w *Wallet) Currency() string     { return w.currency }
+func (w *Wallet) Balance() Money       { return w.balance }
+func (w *Wallet) Version() int64       { return w.version }
+func (w *Wallet) CreatedAt() time.Time { return w.createdAt }
+func (w *Wallet) UpdatedAt() time.Time { return w.updatedAt }
