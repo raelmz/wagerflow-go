@@ -42,13 +42,13 @@ Dado o prazo curto e a falta de experiência prévia em Go, a estratégia de pri
 
 | Decisão | Escolha | Por quê (resumo) |
 |---|---|---|
-| _(a preencher durante o desenvolvimento)_ | | |
+| Controle de concorrência na carteira | Update atômico condicionado (`UPDATE ... WHERE balance >= X`) | Evita lock global e locks explícitos no código; o próprio SQL garante a invariante de saldo em uma única ida ao banco, sem necessidade de retry loop. Mais simples de implementar e testar sob prazo curto do que lock pessimista ou otimista com versionamento. |
 
 ## 4. Decisões de domínio e dados
 
 | Decisão | Escolha | Por quê (resumo) |
 |---|---|---|
-| _(a preencher durante o desenvolvimento)_ | | |
+| Representação de `Money` | `int64` em centavos (menor unidade monetária) | Evita totalmente `float32`/`float64` (requisito eliminatório). Mais simples de implementar do que integrar uma lib de precisão decimal, e suficiente para o escopo do desafio (moeda única, BRL). |
 
 ## 5. Limitações conhecidas e trabalho não concluído
 
