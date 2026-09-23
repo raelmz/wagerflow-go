@@ -1,6 +1,10 @@
 package domain
 
-import "context"
+import (
+	"context"
+
+	"github.com/google/uuid"
+)
 
 // WagerTransactionRepository define o que a camada de persistência
 // precisa oferecer para WagerTransaction, sem dizer como.
@@ -20,4 +24,15 @@ type WagerTransactionRepository interface {
 	// FindByProviderAndExternalTxID resolve referências de REFUND/ROLLBACK
 	// (seção 7: "resolvido por (providerId, referenceExternalTransactionId)").
 	FindByProviderAndExternalTxID(ctx context.Context, providerID, externalTransactionID string) (*WagerTransaction, error)
+
+	// LockByProviderAndExternalTxID é igual à busca acima, mas trava a
+	// linha até o fim da transação (SELECT ... FOR UPDATE). Usado ao
+	// resolver a referência de uma reversão: duas reversões
+	// concorrentes da mesma aposta ficam em fila aqui, e a segunda
+	// já enxerga o resultado da primeira. Retorna (nil, nil) se não existir.
+	LockByProviderAndExternalTxID(ctx context.Context, providerID, externalTransactionID string) (*WagerTransaction, error)
+
+	// HasProcessedReversalOf diz se a transação referenceID já recebeu
+	// uma reversão (REFUND ou ROLLBACK) em estado PROCESSED.
+	HasProcessedReversalOf(ctx context.Context, referenceID uuid.UUID) (bool, error)
 }

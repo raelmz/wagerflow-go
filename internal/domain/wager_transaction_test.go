@@ -76,7 +76,7 @@ func TestMarkProcessed_NaoPermiteTransicaoAposTerminal(t *testing.T) {
 		KindBet, money, "",
 	)
 
-	if err := tx.MarkProcessed(); err != nil {
+	if err := tx.MarkProcessed(money); err != nil {
 		t.Fatalf("não esperava erro ao marcar como processada: %v", err)
 	}
 	// Tentar transicionar de novo deve falhar — replay não reaplica.
@@ -103,5 +103,72 @@ func TestNewOpeningTransaction_RejeitaValorZero(t *testing.T) {
 	_, err := NewOpeningTransaction(uuid.New(), uuid.New(), ZeroMoney("BRL"))
 	if !errors.Is(err, ErrInvalidWagerData) {
 		t.Errorf("esperava ErrInvalidWagerData para saldo inicial zero, veio %v", err)
+	}
+}
+
+func TestMarkProcessed_GuardaSaldoResultante(t *testing.T) {
+	money, _ := NewMoneyFromString("25.00", "BRL")
+	tx, _ := NewExternalWagerTransaction(
+		"tx-5", "provider-a", "key-5", "hash",
+		uuid.New(), uuid.New(), "round-1", "game-1",
+		KindBet, money, "",
+	)
+
+	// Enquanto não concluiu, não existe saldo resultante.
+	if _, ok := tx.ResultingBalance(); ok {
+		t.Fatal("transação PENDING não deveria ter saldo resultante")
+	}
+
+	saldo, _ := NewMoneyFromString("975.00", "BRL")
+	if err := tx.MarkProcessed(saldo); err != nil {
+		t.Fatalf("não esperava erro: %v", err)
+	}
+	got, ok := tx.ResultingBalance()
+	if !ok || !got.Equals(saldo) {
+		t.Errorf("esperava saldo resultante 975.00, veio %v (ok=%v)", got, ok)
+	}
+}
+
+func TestResolveReference(t *testing.T) {
+	money, _ := NewMoneyFromString("25.00", "BRL")
+	tx, _ := NewExternalWagerTransaction(
+		"tx-6", "provider-a", "key-6", "hash",
+		uuid.New(), uuid.New(), "round-1", "game-1",
+		KindRefund, money, "bet-1",
+	)
+
+	if err := tx.ResolveReference(uuid.Nil); !errors.Is(err, ErrInvalidWagerData) {
+		t.Errorf("esperava ErrInvalidWagerData para referência nula, veio %v", err)
+	}
+
+	refID := uuid.New()
+	if err := tx.ResolveReference(refID); err != nil {
+		t.Fatalf("não esperava erro: %v", err)
+	}
+	if tx.ResolvedReferenceID() != refID {
+		t.Errorf("referência resolvida não foi guardada")
+	}
+
+	// Depois de terminal, não pode mais mudar.
+	_ = tx.MarkRejected("ANY_CODE")
+	if err := tx.ResolveReference(uuid.New()); !errors.Is(err, ErrTransactionAlreadyTerminal) {
+		t.Errorf("esperava ErrTransactionAlreadyTerminal, veio %v", err)
+	}
+}
+
+func TestMarkPendingReference_PodeSeguirParaProcessed(t *testing.T) {
+	// PENDING_REFERENCE NÃO é terminal: o worker de referências
+	// precisa conseguir concluir a transação depois.
+	money, _ := NewMoneyFromString("25.00", "BRL")
+	tx, _ := NewExternalWagerTransaction(
+		"tx-7", "provider-a", "key-7", "hash",
+		uuid.New(), uuid.New(), "round-1", "game-1",
+		KindRefund, money, "bet-1",
+	)
+	if err := tx.MarkPendingReference(); err != nil {
+		t.Fatalf("não esperava erro: %v", err)
+	}
+	if err := tx.MarkProcessed(money); err != nil {
+		t.Errorf("PENDING_REFERENCE deveria poder virar PROCESSED, veio erro: %v", err)
 	}
 }

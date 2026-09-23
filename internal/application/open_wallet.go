@@ -54,7 +54,7 @@ func (uc *OpenWalletUseCase) Execute(ctx context.Context, playerID uuid.UUID, in
 		if err != nil {
 			return err
 		}
-		if err := openingTx.MarkProcessed(); err != nil {
+		if err := openingTx.MarkProcessed(wallet.Balance()); err != nil {
 			return err
 		}
 		if err := uow.WagerTransactions().Create(ctx, openingTx); err != nil {

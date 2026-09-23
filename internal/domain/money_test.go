@@ -96,3 +96,19 @@ func TestZeroMoney(t *testing.T) {
 		t.Errorf("esperava BRL, veio %s", m.Currency())
 	}
 }
+func TestMoney_Equals(t *testing.T) {
+	a, _ := NewMoneyFromString("10.00", "BRL")
+	b, _ := NewMoneyFromString("10.00", "brl") // moeda é normalizada
+	c, _ := NewMoneyFromString("10.01", "BRL")
+	d, _ := NewMoneyFromString("10.00", "USD")
+
+	if !a.Equals(b) {
+		t.Error("10.00 BRL deveria ser igual a 10.00 brl")
+	}
+	if a.Equals(c) {
+		t.Error("10.00 não deveria ser igual a 10.01")
+	}
+	if a.Equals(d) {
+		t.Error("BRL não deveria ser igual a USD, mesmo com o mesmo valor")
+	}
+}

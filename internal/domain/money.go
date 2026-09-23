@@ -18,10 +18,10 @@ import (
 // e comparamos erros com `errors.Is(err, ErrX)` em vez de capturar
 // exceções. As variáveis abaixo são os erros "conhecidos" do domínio.
 var (
-	ErrInvalidAmount     = errors.New("valor monetário inválido")
-	ErrNegativeAmount    = errors.New("valor monetário não pode ser negativo em entradas externas")
-	ErrCurrencyMismatch  = errors.New("moedas incompatíveis para esta operação")
-	ErrAmountOverflow    = errors.New("valor monetário excede o limite representável")
+	ErrInvalidAmount    = errors.New("valor monetário inválido")
+	ErrNegativeAmount   = errors.New("valor monetário não pode ser negativo em entradas externas")
+	ErrCurrencyMismatch = errors.New("moedas incompatíveis para esta operação")
+	ErrAmountOverflow   = errors.New("valor monetário excede o limite representável")
 )
 
 // --- Conceito Go 2: struct ---
@@ -142,6 +142,15 @@ func (m Money) GreaterThanOrEqual(other Money) (bool, error) {
 		return false, ErrCurrencyMismatch
 	}
 	return m.amountCents >= other.amountCents, nil
+}
+
+// Equals diz se dois valores são idênticos: mesma moeda E mesmo valor.
+// Diferente de GreaterThanOrEqual, não devolve erro em moedas
+// diferentes — para igualdade, "BRL 10.00" e "USD 10.00" simplesmente
+// não são iguais. Usado, por exemplo, para conferir que uma reversão
+// tem exatamente o valor da operação que ela desfaz.
+func (m Money) Equals(other Money) bool {
+	return m.currency == other.currency && m.amountCents == other.amountCents
 }
 
 // Currency devolve o código da moeda (ex: "BRL").

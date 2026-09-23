@@ -50,22 +50,24 @@ var (
 // interna) sobre uma carteira. Guarda tanto os dados de entrada
 // quanto o resultado do processamento.
 type WagerTransaction struct {
-	id                     uuid.UUID
-	externalTransactionID  string // vazio para OPENING
-	providerID             string // vazio para OPENING
-	idempotencyKey         string // vazio para OPENING
-	payloadHash            string
-	walletID               uuid.UUID
-	playerID               uuid.UUID
-	roundID                string // vazio para OPENING
-	gameID                 string // vazio para OPENING
-	kind                   WagerKind
-	money                  Money
-	referenceExternalTxID  string // preenchido só em REFUND/ROLLBACK
-	status                 WagerStatus
-	failureCode            string
-	createdAt              time.Time
-	updatedAt              time.Time
+	id                    uuid.UUID
+	externalTransactionID string // vazio para OPENING
+	providerID            string // vazio para OPENING
+	idempotencyKey        string // vazio para OPENING
+	payloadHash           string
+	walletID              uuid.UUID
+	playerID              uuid.UUID
+	roundID               string // vazio para OPENING
+	gameID                string // vazio para OPENING
+	kind                  WagerKind
+	money                 Money
+	referenceExternalTxID string    // preenchido só em REFUND/ROLLBACK (e opcional em WIN)
+	resolvedReferenceID   uuid.UUID // id INTERNO da referência, depois de resolvida (uuid.Nil = ainda não)
+	status                WagerStatus
+	failureCode           string
+	resultingBalance      *Money // saldo da carteira ao concluir; nil enquanto não concluída (ver ResultingBalance)
+	createdAt             time.Time
+	updatedAt             time.Time
 }
 
 // NewExternalWagerTransaction cria uma transação vinda de HTTP ou SQS
@@ -167,12 +169,35 @@ func NewOpeningTransaction(walletID uuid.UUID, playerID uuid.UUID, money Money) 
 // com ErrTransactionAlreadyTerminal — essa é a regra que impede um
 // replay de reprocessar algo que já tem resultado definitivo.
 
-// MarkProcessed finaliza a transação como concluída com sucesso.
-func (t *WagerTransaction) MarkProcessed() error {
+// MarkProcessed finaliza a transação como concluída com sucesso e
+// registra o saldo da carteira observado nesse momento.
+//
+// Por que guardar o saldo aqui? A seção 9 do desafio exige que um
+// replay devolva "o saldo observado no processamento original, mesmo
+// que a carteira já tenha recebido outras movimentações". Se a
+// transação não lembrasse desse saldo, o replay só teria o saldo
+// ATUAL da carteira — que já pode ser outro.
+func (t *WagerTransaction) MarkProcessed(resultingBalance Money) error {
 	if t.status.isTerminal() {
 		return ErrTransactionAlreadyTerminal
 	}
 	t.status = StatusProcessed
+	t.resultingBalance = &resultingBalance
+	t.updatedAt = time.Now().UTC()
+	return nil
+}
+
+// ResolveReference registra o id INTERNO da transação referenciada
+// (REFUND/ROLLBACK, ou WIN que informou uma aposta). Só faz sentido
+// enquanto a transação ainda não é terminal.
+func (t *WagerTransaction) ResolveReference(referenceID uuid.UUID) error {
+	if t.status.isTerminal() {
+		return ErrTransactionAlreadyTerminal
+	}
+	if referenceID == uuid.Nil {
+		return ErrInvalidWagerData
+	}
+	t.resolvedReferenceID = referenceID
 	t.updatedAt = time.Now().UTC()
 	return nil
 }
@@ -237,8 +262,10 @@ func RehydrateWagerTransaction(
 	kind WagerKind,
 	money Money,
 	referenceExternalTxID string,
+	resolvedReferenceID uuid.UUID,
 	status WagerStatus,
 	failureCode string,
+	resultingBalance *Money,
 	createdAt time.Time,
 	updatedAt time.Time,
 ) *WagerTransaction {
@@ -255,8 +282,10 @@ func RehydrateWagerTransaction(
 		kind:                  kind,
 		money:                 money,
 		referenceExternalTxID: referenceExternalTxID,
+		resolvedReferenceID:   resolvedReferenceID,
 		status:                status,
 		failureCode:           failureCode,
+		resultingBalance:      resultingBalance,
 		createdAt:             createdAt,
 		updatedAt:             updatedAt,
 	}
@@ -264,19 +293,35 @@ func RehydrateWagerTransaction(
 
 // --- Getters ---
 
-func (t *WagerTransaction) ID() uuid.UUID                    { return t.id }
-func (t *WagerTransaction) ExternalTransactionID() string    { return t.externalTransactionID }
-func (t *WagerTransaction) ProviderID() string                { return t.providerID }
-func (t *WagerTransaction) IdempotencyKey() string             { return t.idempotencyKey }
-func (t *WagerTransaction) PayloadHash() string                { return t.payloadHash }
-func (t *WagerTransaction) WalletID() uuid.UUID                { return t.walletID }
-func (t *WagerTransaction) PlayerID() uuid.UUID                { return t.playerID }
-func (t *WagerTransaction) RoundID() string                    { return t.roundID }
-func (t *WagerTransaction) GameID() string                     { return t.gameID }
-func (t *WagerTransaction) Kind() WagerKind                    { return t.kind }
-func (t *WagerTransaction) Money() Money                       { return t.money }
-func (t *WagerTransaction) ReferenceExternalTxID() string      { return t.referenceExternalTxID }
-func (t *WagerTransaction) Status() WagerStatus                { return t.status }
-func (t *WagerTransaction) FailureCode() string                { return t.failureCode }
-func (t *WagerTransaction) CreatedAt() time.Time                { return t.createdAt }
-func (t *WagerTransaction) UpdatedAt() time.Time                { return t.updatedAt }
+func (t *WagerTransaction) ID() uuid.UUID                 { return t.id }
+func (t *WagerTransaction) ExternalTransactionID() string { return t.externalTransactionID }
+func (t *WagerTransaction) ProviderID() string            { return t.providerID }
+func (t *WagerTransaction) IdempotencyKey() string        { return t.idempotencyKey }
+func (t *WagerTransaction) PayloadHash() string           { return t.payloadHash }
+func (t *WagerTransaction) WalletID() uuid.UUID           { return t.walletID }
+func (t *WagerTransaction) PlayerID() uuid.UUID           { return t.playerID }
+func (t *WagerTransaction) RoundID() string               { return t.roundID }
+func (t *WagerTransaction) GameID() string                { return t.gameID }
+func (t *WagerTransaction) Kind() WagerKind               { return t.kind }
+func (t *WagerTransaction) Money() Money                  { return t.money }
+func (t *WagerTransaction) ReferenceExternalTxID() string { return t.referenceExternalTxID }
+
+// ResolvedReferenceID devolve o id interno da referência resolvida.
+// uuid.Nil significa que não há referência resolvida (ainda).
+func (t *WagerTransaction) ResolvedReferenceID() uuid.UUID { return t.resolvedReferenceID }
+
+// ResultingBalance devolve o saldo observado ao concluir a operação.
+// O segundo retorno é false quando a transação não concluiu com
+// sucesso (rejeitada, pendente...) e portanto não tem saldo resultante.
+// Devolvemos uma CÓPIA do valor, nunca o ponteiro interno.
+func (t *WagerTransaction) ResultingBalance() (Money, bool) {
+	if t.resultingBalance == nil {
+		return Money{}, false
+	}
+	return *t.resultingBalance, true
+}
+
+func (t *WagerTransaction) Status() WagerStatus  { return t.status }
+func (t *WagerTransaction) FailureCode() string  { return t.failureCode }
+func (t *WagerTransaction) CreatedAt() time.Time { return t.createdAt }
+func (t *WagerTransaction) UpdatedAt() time.Time { return t.updatedAt }
