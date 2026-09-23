@@ -169,3 +169,18 @@ func (m Money) String() string {
 func normalizeCurrency(currency string) string {
 	return strings.ToUpper(strings.TrimSpace(currency))
 }
+
+// MoneyFromCents reconstrói um Money a partir do valor já em
+// centavos, exatamente como ele é lido de volta do banco (coluna
+// BIGINT). Diferente de NewMoneyFromString, aqui não há parsing de
+// texto — é usado só pela camada de persistência, na "reidratação"
+// (RehydrateWallet e afins), nunca para validar entrada externa.
+func MoneyFromCents(cents int64, currency string) Money {
+	return Money{amountCents: cents, currency: normalizeCurrency(currency)}
+}
+
+// Cents expõe o valor em centavos, para a camada de persistência
+// gravar na coluna BIGINT do banco.
+func (m Money) Cents() int64 {
+	return m.amountCents
+}
