@@ -77,6 +77,32 @@ func NewWalletLedgerEntry(
 	}, nil
 }
 
+// RehydrateWalletLedgerEntry reconstrói um lançamento a partir de
+// dados já persistidos, sem refazer a validação matemática (ela já
+// foi feita uma vez, no momento da criação — reidratar não deve
+// rejeitar um registro que já existe no banco).
+func RehydrateWalletLedgerEntry(
+	id uuid.UUID,
+	walletID uuid.UUID,
+	transactionID uuid.UUID,
+	direction LedgerDirection,
+	amount Money,
+	balanceBefore Money,
+	balanceAfter Money,
+	createdAt time.Time,
+) *WalletLedgerEntry {
+	return &WalletLedgerEntry{
+		id:            id,
+		walletID:      walletID,
+		transactionID: transactionID,
+		direction:     direction,
+		amount:        amount,
+		balanceBefore: balanceBefore,
+		balanceAfter:  balanceAfter,
+		createdAt:     createdAt,
+	}
+}
+
 // --- Getters (sem setters — lançamento é imutável) ---
 
 func (e *WalletLedgerEntry) ID() uuid.UUID                 { return e.id }

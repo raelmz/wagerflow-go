@@ -8,28 +8,26 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/raelmz/wagerflow-go/internal/domain"
 )
 
 // WalletRepository é a implementação real (Postgres) da interface
-// domain.WalletRepository. O nome do tipo pode repetir o da interface
-// porque estão em pacotes diferentes (domain.WalletRepository vs
-// postgres.WalletRepository) — em Go isso não gera conflito.
+// domain.WalletRepository. Repare que o campo agora é DBTX, não mais
+// *pgxpool.Pool — isso permite criar um WalletRepository "por cima"
+// tanto do pool quanto de uma transação em andamento (ver tx_manager.go).
 type WalletRepository struct {
-	pool *pgxpool.Pool
+	db DBTX
 }
 
-// NewWalletRepository cria o repositório. Recebe o pool já pronto
-// (criado em cmd/api, onde a aplicação for montada) — o repositório
-// em si não decide como conectar, só usa a conexão recebida.
-func NewWalletRepository(pool *pgxpool.Pool) *WalletRepository {
-	return &WalletRepository{pool: pool}
+// NewWalletRepository cria o repositório sobre qualquer DBTX — pode
+// ser o pool (fora de transação) ou um pgx.Tx (dentro de uma).
+func NewWalletRepository(db DBTX) *WalletRepository {
+	return &WalletRepository{db: db}
 }
 
 func (r *WalletRepository) Create(ctx context.Context, wallet *domain.Wallet) error {
-	_, err := r.pool.Exec(ctx, `
+	_, err := r.db.Exec(ctx, `
 		INSERT INTO wallets (id, player_id, currency, balance_cents, version, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`,
@@ -44,7 +42,7 @@ func (r *WalletRepository) Create(ctx context.Context, wallet *domain.Wallet) er
 }
 
 func (r *WalletRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.Wallet, error) {
-	row := r.pool.QueryRow(ctx, `
+	row := r.db.QueryRow(ctx, `
 		SELECT id, player_id, currency, balance_cents, version, created_at, updated_at
 		FROM wallets WHERE id = $1
 	`, id)
@@ -52,7 +50,7 @@ func (r *WalletRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.
 }
 
 func (r *WalletRepository) FindByPlayerAndCurrency(ctx context.Context, playerID uuid.UUID, currency string) (*domain.Wallet, error) {
-	row := r.pool.QueryRow(ctx, `
+	row := r.db.QueryRow(ctx, `
 		SELECT id, player_id, currency, balance_cents, version, created_at, updated_at
 		FROM wallets WHERE player_id = $1 AND currency = $2
 	`, playerID, currency)
@@ -60,15 +58,14 @@ func (r *WalletRepository) FindByPlayerAndCurrency(ctx context.Context, playerID
 }
 
 // Debit é o UPDATE ATÔMICO CONDICIONADO combinado em docs/PROJETO.md.
-// Repare que a condição "balance_cents >= $1" está no próprio WHERE:
-// o Postgres só aplica o UPDATE se essa condição for verdadeira NA
-// LINHA ATUAL do banco, no exato instante da operação — mesmo que
-// duas goroutines/instâncias tentem isso ao mesmo tempo, o banco
-// serializa as duas tentativas e só uma vê o saldo "antes" da outra.
-// Não precisamos de lock explícito nem de retry: se a condição falhar,
-// simplesmente 0 linhas são afetadas.
+// A condição "balance_cents >= $1" está no próprio WHERE: o Postgres
+// só aplica o UPDATE se isso for verdade NA LINHA ATUAL, no exato
+// instante da operação — mesmo com duas instâncias tentando ao mesmo
+// tempo, o banco serializa e só uma vence. Quando chamado DENTRO de
+// uma transação (via TxManager), essa garantia vale para a transação
+// inteira: ninguém mais enxerga essa linha até o commit.
 func (r *WalletRepository) Debit(ctx context.Context, walletID uuid.UUID, amount domain.Money) (*domain.Wallet, error) {
-	row := r.pool.QueryRow(ctx, `
+	row := r.db.QueryRow(ctx, `
 		UPDATE wallets
 		SET balance_cents = balance_cents - $1,
 		    version = version + 1,
@@ -82,21 +79,14 @@ func (r *WalletRepository) Debit(ctx context.Context, walletID uuid.UUID, amount
 		return nil, err
 	}
 	if wallet == nil {
-		// 0 linhas afetadas: ou a carteira não existe, ou o saldo
-		// era insuficiente. Para o escopo do desafio, tratamos ambos
-		// como "operação rejeitada" — quem chama decide o failureCode
-		// exato (o caso "não existe" é raro, pois a wallet é
-		// resolvida antes, na camada de aplicação).
 		return nil, domain.ErrInsufficientBalance
 	}
 	return wallet, nil
 }
 
-// Credit é o equivalente para crédito. Não tem condição de saldo
-// (crédito nunca deixa a carteira negativa), mas ainda é atômico:
-// leitura e escrita acontecem na mesma instrução SQL.
+// Credit é o equivalente para crédito.
 func (r *WalletRepository) Credit(ctx context.Context, walletID uuid.UUID, amount domain.Money) (*domain.Wallet, error) {
-	row := r.pool.QueryRow(ctx, `
+	row := r.db.QueryRow(ctx, `
 		UPDATE wallets
 		SET balance_cents = balance_cents + $1,
 		    version = version + 1,
@@ -115,12 +105,6 @@ func (r *WalletRepository) Credit(ctx context.Context, walletID uuid.UUID, amoun
 	return wallet, nil
 }
 
-// scanWallet lê uma linha do banco e reconstrói um *domain.Wallet
-// usando RehydrateWallet (não NewWallet — estamos reconstruindo uma
-// carteira que já existe, não criando uma nova). Devolve (nil, nil)
-// quando a linha não existe (pgx.ErrNoRows), que é o contrato
-// documentado na interface — "não encontrado" é um resultado válido,
-// não um erro de infraestrutura.
 func scanWallet(row pgx.Row) (*domain.Wallet, error) {
 	var (
 		id, playerID          uuid.UUID

@@ -219,6 +219,49 @@ func (t *WagerTransaction) MarkFailed(failureCode string) error {
 	return nil
 }
 
+// RehydrateWagerTransaction reconstrói uma transação a partir de
+// dados já persistidos no banco. Não reaplica nenhuma regra de
+// negócio nem dispara nenhuma transição — só monta a struct com o
+// estado que já existia, exatamente como RehydrateWallet faz para
+// a carteira.
+func RehydrateWagerTransaction(
+	id uuid.UUID,
+	externalTransactionID string,
+	providerID string,
+	idempotencyKey string,
+	payloadHash string,
+	walletID uuid.UUID,
+	playerID uuid.UUID,
+	roundID string,
+	gameID string,
+	kind WagerKind,
+	money Money,
+	referenceExternalTxID string,
+	status WagerStatus,
+	failureCode string,
+	createdAt time.Time,
+	updatedAt time.Time,
+) *WagerTransaction {
+	return &WagerTransaction{
+		id:                    id,
+		externalTransactionID: externalTransactionID,
+		providerID:            providerID,
+		idempotencyKey:        idempotencyKey,
+		payloadHash:           payloadHash,
+		walletID:              walletID,
+		playerID:              playerID,
+		roundID:               roundID,
+		gameID:                gameID,
+		kind:                  kind,
+		money:                 money,
+		referenceExternalTxID: referenceExternalTxID,
+		status:                status,
+		failureCode:           failureCode,
+		createdAt:             createdAt,
+		updatedAt:             updatedAt,
+	}
+}
+
 // --- Getters ---
 
 func (t *WagerTransaction) ID() uuid.UUID                    { return t.id }
