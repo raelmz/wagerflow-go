@@ -231,8 +231,22 @@ func findExisting(ctx context.Context, uow domain.UnitOfWork, candidate *domain.
 		return nil, err
 	}
 	if byExternalID != nil {
-		// Chegamos aqui porque a CHAVE não existia: então este registro
-		// foi criado com outra chave.
+		// Em READ COMMITTED, esta segunda busca e a busca por chave
+		// acima não veem necessariamente o mesmo instante do banco:
+		// sob corrida, é possível que o INSERT do vencedor já esteja
+		// visível aqui (por externalId), mas não estivesse visível na
+		// primeira busca (por idempotencyKey), que rodou um instante
+		// antes. Sem esta checagem, o perdedor da corrida recebia
+		// ErrExternalTransactionConflict por engano — era a MESMA
+		// operação, só vista em outro instante.
+		if byExternalID.IdempotencyKey() == candidate.IdempotencyKey() {
+			if byExternalID.PayloadHash() != candidate.PayloadHash() {
+				return nil, domain.ErrIdempotencyConflict
+			}
+			return byExternalID, nil
+		}
+		// Chave realmente diferente: este externalId já pertence a
+		// outra requisição.
 		return nil, domain.ErrExternalTransactionConflict
 	}
 
