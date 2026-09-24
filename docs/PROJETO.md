@@ -106,21 +106,49 @@ Todos são definitivos para a operação: fica `REJECTED` e um replay devolve a 
 
 Entradas **corrigíveis** (não geram registro): valor inválido, `OPENING` vindo de fora, `REFUND`/`ROLLBACK` sem referência, carteira inexistente, jogador que não é o dono, moeda diferente da carteira.
 
+### 4.4. Outbox transacional (escrita dos eventos)
+
+| Decisão | Escolha | Por quê (resumo) |
+|---|---|---|
+| Onde o evento é gravado | Dentro da MESMA transação SQL da mudança de estado, via `UnitOfWork.Outbox()` (`OutboxRepository.Append`) | Nunca existe evento sem o fato que o originou, nem fato confirmado sem evento. Nada é publicado antes do commit, porque quem publica é um worker separado, que só enxerga linhas já confirmadas. |
+| Onde a regra "qual evento sai" mora | No ponto onde o estado final é gravado: `applyMovement`, `applyLoss`, `reject` e `markPendingReference` (`wager_applier.go`), e no `OpenWalletUseCase` | Como `applyWagerTransaction` é reutilizado pelo worker de referências pendentes, o worker herda a emissão dos eventos sem duplicar regra. |
+| Tipo e versão do evento | Definidos pelo construtor de cada evento (`domain/outbox_event.go`); versão 1 | O chamador não escolhe tipo nem versão; uma mudança incompatível de contrato vira versão 2 no construtor. |
+| Construtores validam o estado | `WagerTransactionProcessed` exige transação `PROCESSED` com saldo resultante; `Rejected` exige `REJECTED`; `PendingReference` exige `PENDING_REFERENCE` com referência externa | O evento nunca descreve algo que ainda não aconteceu. |
+| Payload | Envelope completo (`eventId`, `eventType`, `aggregateId`, `correlationId`, `causationId` opcional, `occurredAt` UTC RFC 3339 com ms, `version`, `data`) serializado no momento da criação e guardado como JSONB | Snapshot imutável: alterar a transação depois não muda o que foi registrado. Não exigiu migration nova. Dinheiro sai sempre como string decimal. |
+| `aggregateId` | Id da transação nos eventos de transação; id da carteira em `WalletBalanceChanged` | Interpretação minha (o desafio não fixa). Eventos de uma mesma carteira ficam agrupáveis por `aggregateId`. |
+| `correlationId` | Vem do `context.Context` (`application.WithCorrelationID`); se a entrada não informar, usa o id da transação | É dado de rastreamento, não de negócio: não entra no hash de idempotência e será reaproveitado nos logs. Evita mudar a assinatura de cada função. |
+| `causationId` | Só em `WalletBalanceChanged`, apontando o `eventId` do `WagerTransactionProcessed` que o causou | Opcional no contrato; deixa a relação causa/efeito explícita. |
+| `WalletBalanceChanged` | Construído a partir do lançamento do ledger + versão da carteira devolvida pelo `UPDATE ... RETURNING` | Evento e ledger não têm como divergir (o lançamento já foi validado: `balanceAfter = balanceBefore ± valor`). |
+| Abertura de carteira | Saldo inicial positivo grava `WagerTransactionProcessed` (kind `OPENING`, sem metadados externos) e `WalletBalanceChanged` (versão 1) no commit da carteira. Saldo zero não grava eventos | Seção 9 do desafio. |
+| Quais eventos por resultado | BET/WIN/REFUND/ROLLBACK processados: `Processed` + `BalanceChanged`. LOSS: só `Processed`. Rejeição: `Rejected`. Referência ausente: `PendingReference` | Seções 7 e 11 do desafio. |
+| `PendingReference` só na 1ª vez | Emitido apenas quando a transação sai de `PENDING` para `PENDING_REFERENCE` | Quando o worker reaplicar e a referência continuar ausente, não publica o mesmo aviso a cada tentativa. |
+| Replay | Não grava eventos | O replay só consulta o resultado persistido; não reaplica a operação. |
+
+### 4.5. Testes de integração e correções encontradas por eles
+
+Escritos em `test/integration/` (build tag `integration`), cada teste roda contra um Postgres **real**, num banco criado e apagado na hora (não um schema — um banco novo por teste, com as migrations aplicadas do zero). É por isso que existem numa pasta separada, com build tag: não rodam em `go test ./...` normal (que não pode depender de infraestrutura de fora) nem em CI sem um Postgres disponível.
+
+Cobrem os cenários obrigatórios da seção 13: migrations up/down/up; imutabilidade do ledger (`UPDATE`, `DELETE` e `TRUNCATE`); as duas apostas de 80.00 sobre saldo de 100.00 (30 rodadas, para não passar por sorte); a mesma aposta 50× em paralelo (só 1 débito); carteiras diferentes em paralelo (sem lock global); duas reversões concorrentes da mesma aposta (só 1 vence); idempotência sobrevivendo a um "reinício" (pool novo, mesmo banco); atomicidade com erro no meio da transação e com `panic`; atomicidade da outbox (evento no mesmo commit do estado, replay não duplica).
+
+Escrever estes testes encontrou 3 bugs reais, todos corrigidos:
+
+1. **`findExisting` sob corrida (`application/process_wager_transaction.go`)** — a checagem de idempotência faz duas buscas separadas: por `idempotencyKey` e por `(providerId, externalTransactionId)`. Em `READ COMMITTED` (o nível padrão do Postgres), cada `SELECT` dentro da mesma transação pode enxergar um instante diferente do banco. Sob corrida real, era possível a segunda busca (por `externalId`) já enxergar a linha que o vencedor acabou de inserir, enquanto a primeira busca (por `idempotencyKey`) — que rodou um instante antes — ainda não a via. O código tratava isso como `ErrExternalTransactionConflict` (um `externalId` "roubado" por outra chave), quando na verdade era a MESMA operação, só vista em outro instante. Corrigido: quando o registro achado por `externalId` tem a mesma `idempotencyKey` da candidata, é tratado como a mesma operação (replay), não como conflito. Reproduzido em teste unitário com um repositório "desalinhado" de propósito (`internal/application/find_existing_test.go`), sem precisar de Postgres para provar a lógica.
+2. **`TRUNCATE` na ledger não era bloqueado** — a migration 000003 criou triggers `BEFORE UPDATE`/`BEFORE DELETE`, do tipo `FOR EACH ROW`. `TRUNCATE` é um comando de outra categoria (nível de comando, não de linha): nenhum dos dois triggers dispara, e a tabela append-only podia ser esvaziada sem erro nenhum. Corrigido pela migration `000006`, um terceiro trigger `BEFORE TRUNCATE ... FOR EACH STATEMENT`, reaproveitando a mesma função `prevent_ledger_mutation()`.
+3. **`Money`: `"-0.50"` virava `+0.50`; `"25.+5"` virava `25.05`** — a validação antiga rejeitava negativo checando se a parte inteira (`wholePart`) era `< 0`; para `"-0.50"`, essa parte é `"-0"`, que o `ParseInt` lê como `0` — nem positivo nem negativo — então o sinal era perdido silenciosamente. Da mesma forma, a parte decimal era passada direto para `ParseInt`, que aceita um `"+"` de propósito (`"+5"` é um `int64` válido), então `"25.+5"` virava `25.05` em vez de ser rejeitado. Corrigido tratando o sinal separadamente ANTES de dividir em parte inteira/decimal, e exigindo que as duas partes sejam só dígitos. Também foram adicionados `Money.Negate()` (exigido pela seção 6.1) e checagem de overflow em `Add`/`Subtract` (havia um `TODO` no código antigo).
+
 ## 5. Limitações conhecidas e trabalho não concluído
 
 > Esta seção deve ser mantida honesta e atualizada até a entrega final — é parte da nota de documentação (5 pts) e demonstra maturidade profissional, mesmo quando o item não foi feito por falta de tempo.
 
-Estado em 23/09/2026 (fim do dia 2 de 3). Itens abaixo ainda **não** existem e serão marcados como concluídos ou como limitação na entrega:
+Estado em 23/09/2026 (noite do dia 2 de 3). Itens abaixo ainda **não** existem e serão marcados como concluídos ou como limitação na entrega:
 
 - Sem API HTTP, sem composição com Uber Fx e sem autenticação (Keycloak). Autenticação real é requisito eliminatório.
 - Sem consumidor SQS, sem escrita em inbox e sem publicação da outbox. As tabelas existem (migration 000004), mas nada as usa.
-- Os eventos de outbox (`WagerTransactionProcessed`, `WalletBalanceChanged` etc.) **ainda não são gravados** na mesma transação, nem na abertura de carteira nem no processamento de operações (seções 6.5, 9 e 11 do desafio).
+- Os eventos de outbox já são **gravados** na mesma transação (seção 4.4) — e o teste de integração prova que isso é atômico com o estado e que replay não duplica —, mas nada os **publica** ainda: falta o worker publicador (múltiplos publishers, `FOR UPDATE SKIP LOCKED`, backoff, recuperação de trabalho abandonado, `eventId` estável em republicação) e o destino dos eventos de saída. `OutboxEvent` ainda não tem reidratação, porque a leitura da outbox será feita pelo worker.
 - Sem worker de referências pendentes (o caso de uso já grava `PENDING_REFERENCE`, mas nada as retoma; faltam tentativas e próximo retry, que exigem migration).
-- Testes contra Postgres real (concorrência de 100.00 com duas apostas de 80.00, 50 requisições iguais em paralelo, reversões concorrentes, imutabilidade do ledger) ainda não foram escritos. Hoje o caso de uso é coberto por testes unitários com repositórios em memória, que **não** provam concorrência nem atomicidade.
 - Sem endpoints de leitura, reconciliação e health checks; faltam as consultas de repositório correspondentes (busca por id, ledger paginado).
 - Sem observabilidade (logs JSON, métricas).
-- `Money.Add` ainda não checa overflow (há um `TODO` no código); o parsing aceita `+25.00` e zeros à esquerda, que o hash normaliza para a mesma forma.
-- Os testes do caso de uso rodam com um `TxRunner` em memória que não simula rollback nem isolamento.
+- Os testes de integração (seção 4.5) cobrem os cenários obrigatórios da seção 13, mas não incluem ainda o teste "negativo" descrito nela — remover de propósito o `FOR UPDATE`/a condição de saldo no `WHERE` e confirmar que o teste correspondente falha. É uma checagem manual, não automatizada no CI.
 - O `ARCHITECTURE.md` exigido na seção 15 do desafio ainda não existe; este `PROJETO.md` será a base dele.
 
 ## 6. Fluxo de desenvolvimento e plano dia a dia
