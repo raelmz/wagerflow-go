@@ -52,24 +52,42 @@ func ZeroMoney(currency string) Money {
 // está se algo deu errado". Quem chama SEMPRE deve checar o erro
 // antes de usar o resultado.
 func NewMoneyFromString(amount string, currency string) (Money, error) {
-	amount = strings.TrimSpace(amount)
+	raw := strings.TrimSpace(amount)
 	currency = normalizeCurrency(currency)
 
-	if amount == "" {
+	if raw == "" {
 		return Money{}, fmt.Errorf("%w: valor vazio", ErrInvalidAmount)
 	}
 
 	// Rejeita notação científica explicitamente (ex: "1e10"), porque
 	// o desafio exige isso e strconv.ParseFloat aceitaria silenciosamente.
-	if strings.ContainsAny(amount, "eE") {
+	if strings.ContainsAny(raw, "eE") {
 		return Money{}, fmt.Errorf("%w: notação científica não é permitida", ErrInvalidAmount)
+	}
+
+	// O sinal é tratado separadamente, ANTES de dividir em parte
+	// inteira/decimal. Corrige um bug real: "-0.50" tinha wholePart
+	// "-0", que o ParseInt lê como 0 (nem positivo nem negativo) — a
+	// checagem antiga de "wholePart < 0" nunca disparava para esse
+	// caso e o valor virava +0.50 silenciosamente.
+	negative := strings.HasPrefix(raw, "-")
+	numeric := raw
+	if negative {
+		numeric = raw[1:]
 	}
 
 	// Exige exatamente duas casas decimais (escala fixa), como o
 	// desafio pede: "25.00" é válido, "25.0" ou "25.005" não são.
-	parts := strings.Split(amount, ".")
+	parts := strings.Split(numeric, ".")
 	if len(parts) != 2 || len(parts[1]) != 2 {
 		return Money{}, fmt.Errorf("%w: valor deve ter exatamente duas casas decimais", ErrInvalidAmount)
+	}
+
+	// Só dígitos em cada parte. Sem isso, ParseInt aceita prefixos
+	// "+"/"-" próprios (ex: "25.+5" virava 25.05, porque "+5" é um
+	// int64 válido para o parser, mesmo não sendo um dígito puro).
+	if !isDigitsOnly(parts[0]) || !isDigitsOnly(parts[1]) {
+		return Money{}, fmt.Errorf("%w: apenas dígitos são permitidos", ErrInvalidAmount)
 	}
 
 	// Convertemos a parte inteira e a parte decimal separadamente,
@@ -83,10 +101,6 @@ func NewMoneyFromString(amount string, currency string) (Money, error) {
 		return Money{}, fmt.Errorf("%w: %v", ErrInvalidAmount, err)
 	}
 
-	if wholePart < 0 || centsPart < 0 {
-		return Money{}, ErrNegativeAmount
-	}
-
 	// Checagem de overflow: se wholePart já é gigantesco, multiplicar
 	// por 100 pode "estourar" o int64. Fazemos a conta seguindo essa
 	// checagem antes de somar.
@@ -97,7 +111,29 @@ func NewMoneyFromString(amount string, currency string) (Money, error) {
 
 	total := wholePart*100 + centsPart
 
+	if negative {
+		// Entradas externas nunca podem ser negativas, mesmo "-0.00":
+		// o sinal em si já indica uma intenção inválida para este
+		// contrato (seção 6.1 exige valor >= 0 na entrada).
+		return Money{}, ErrNegativeAmount
+	}
+
 	return Money{amountCents: total, currency: currency}, nil
+}
+
+// isDigitsOnly diz se s é composto só por dígitos ASCII (0-9) e não é
+// vazio. Usada para recusar sinais ("+"/"-") escondidos dentro da
+// parte inteira ou decimal de um valor.
+func isDigitsOnly(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Add soma dois valores monetários. Retorna erro se as moedas
@@ -112,8 +148,15 @@ func (m Money) Add(other Money) (Money, error) {
 	if m.currency != other.currency {
 		return Money{}, ErrCurrencyMismatch
 	}
-	// TODO: checar overflow também na soma, se o tempo permitir.
-	return Money{amountCents: m.amountCents + other.amountCents, currency: m.currency}, nil
+	sum := m.amountCents + other.amountCents
+	// Overflow de int64: se somamos algo positivo e o resultado ficou
+	// MENOR que m, ou somamos algo negativo e o resultado ficou MAIOR
+	// que m, o valor "deu a volta". É o jeito padrão de detectar
+	// overflow em soma de inteiros com sinal sem usar tipos maiores.
+	if (other.amountCents > 0 && sum < m.amountCents) || (other.amountCents < 0 && sum > m.amountCents) {
+		return Money{}, ErrAmountOverflow
+	}
+	return Money{amountCents: sum, currency: m.currency}, nil
 }
 
 // Subtract subtrai other de m. O resultado pode ser negativo
@@ -123,7 +166,18 @@ func (m Money) Subtract(other Money) (Money, error) {
 	if m.currency != other.currency {
 		return Money{}, ErrCurrencyMismatch
 	}
-	return Money{amountCents: m.amountCents - other.amountCents, currency: m.currency}, nil
+	diff := m.amountCents - other.amountCents
+	if (other.amountCents < 0 && diff < m.amountCents) || (other.amountCents > 0 && diff > m.amountCents) {
+		return Money{}, ErrAmountOverflow
+	}
+	return Money{amountCents: diff, currency: m.currency}, nil
+}
+
+// Negate devolve o mesmo valor com o sinal invertido, na mesma moeda.
+// Exigido pela seção 6.1 do desafio; usado, por exemplo, para expressar
+// um débito como "o negativo de um crédito" em cálculos internos.
+func (m Money) Negate() Money {
+	return Money{amountCents: -m.amountCents, currency: m.currency}
 }
 
 // IsNegative diz se o valor é negativo.

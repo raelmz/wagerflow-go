@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -110,5 +111,78 @@ func TestMoney_Equals(t *testing.T) {
 	}
 	if a.Equals(d) {
 		t.Error("BRL não deveria ser igual a USD, mesmo com o mesmo valor")
+	}
+}
+
+// --- Testes novos: bugs encontrados nos testes de integração ---
+
+func TestNewMoneyFromString_RejeitaZeroComSinalNegativo(t *testing.T) {
+	// Bug real: "-0.50" tinha parte inteira "-0", que ParseInt lê como
+	// 0 — nem positivo nem negativo — então a checagem antiga (baseada
+	// só no sinal de wholePart) deixava passar como +0.50.
+	_, err := NewMoneyFromString("-0.50", "BRL")
+	if !errors.Is(err, ErrNegativeAmount) {
+		t.Fatalf("esperava ErrNegativeAmount para -0.50, veio: %v", err)
+	}
+
+	_, err = NewMoneyFromString("-0.00", "BRL")
+	if !errors.Is(err, ErrNegativeAmount) {
+		t.Fatalf("esperava ErrNegativeAmount para -0.00, veio: %v", err)
+	}
+}
+
+func TestNewMoneyFromString_RejeitaSinalEscondidoNaParteDecimal(t *testing.T) {
+	// Bug real: "25.+5" tinha parte decimal "+5", que ParseInt aceita
+	// como int64 válido (5) — o valor virava 25.05 silenciosamente.
+	_, err := NewMoneyFromString("25.+5", "BRL")
+	if !errors.Is(err, ErrInvalidAmount) {
+		t.Fatalf("esperava ErrInvalidAmount para 25.+5, veio: %v", err)
+	}
+
+	_, err = NewMoneyFromString("+25.00", "BRL")
+	if !errors.Is(err, ErrInvalidAmount) {
+		t.Fatalf("esperava ErrInvalidAmount para +25.00, veio: %v", err)
+	}
+}
+
+func TestNewMoneyFromString_RejeitaOverflowNoParse(t *testing.T) {
+	_, err := NewMoneyFromString("999999999999999999999.00", "BRL")
+	if !errors.Is(err, ErrInvalidAmount) && !errors.Is(err, ErrAmountOverflow) {
+		t.Fatalf("esperava erro de valor inválido/overflow, veio: %v", err)
+	}
+}
+
+func TestAdd_DetectaOverflow(t *testing.T) {
+	quaseMax := MoneyFromCents(math.MaxInt64-10, "BRL")
+	umPouco := MoneyFromCents(100, "BRL")
+
+	_, err := quaseMax.Add(umPouco)
+	if !errors.Is(err, ErrAmountOverflow) {
+		t.Fatalf("esperava ErrAmountOverflow, veio: %v", err)
+	}
+}
+
+func TestSubtract_DetectaOverflow(t *testing.T) {
+	quaseMin := MoneyFromCents(math.MinInt64+10, "BRL")
+	umPouco := MoneyFromCents(100, "BRL")
+
+	_, err := quaseMin.Subtract(umPouco)
+	if !errors.Is(err, ErrAmountOverflow) {
+		t.Fatalf("esperava ErrAmountOverflow, veio: %v", err)
+	}
+}
+
+func TestMoney_Negate(t *testing.T) {
+	credito, _ := NewMoneyFromString("25.00", "BRL")
+	debito := credito.Negate()
+
+	if !debito.IsNegative() {
+		t.Error("esperava que o valor negado fosse negativo")
+	}
+	if debito.Negate().Equals(credito) == false {
+		t.Error("negar duas vezes deveria devolver o valor original")
+	}
+	if debito.Currency() != credito.Currency() {
+		t.Error("Negate não deveria mudar a moeda")
 	}
 }
