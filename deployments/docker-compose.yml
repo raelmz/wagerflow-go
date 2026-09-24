@@ -17,8 +17,47 @@ services:
       timeout: 5s
       retries: 5
 
-  # LocalStack (SQS) e Keycloak (IdP) entram aqui nos próximos passos,
-  # quando implementarmos mensageria e autenticação.
+  # Keycloak (IdP) — item 2 da seção 5 do contexto de sessão.
+  # `start-dev --import-realm` sobe já com o realm `wagerflow` (ver
+  # ./keycloak/realm-export.json), sem precisar configurar nada pela
+  # UI. Três clients de client_credentials nesse realm: `provider-a`
+  # e `provider-b` (dois provedores de exemplo, role `provider`) e
+  # `wagerflow-internal` (role `internal`, usado pelas rotas de
+  # carteira). O client_id de cada um É o providerId — é o claim
+  # `azp` do access token que a API usa para saber quem está falando.
+  #
+  # `start-dev` é adequado para desenvolvimento/desafio (não para
+  # produção, que exigiria `start` com TLS configurado) — decisão
+  # consciente para não gastar tempo com certificados neste escopo.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: wagerflow-keycloak
+    restart: unless-stopped
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    healthcheck:
+      # Sem curl/wget na imagem do Keycloak: usamos o /dev/tcp do
+      # próprio bash para fazer uma requisição HTTP crua e conferir
+      # se o realm "wagerflow" já responde (prova de que o import
+      # terminou, não só que o processo subiu).
+      test:
+        [
+          "CMD-SHELL",
+          "exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e 'GET /realms/wagerflow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && grep -q '\"realm\"' <&3",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  # LocalStack (SQS) entra aqui num próximo passo (item 3 da seção 5
+  # do contexto de sessão), quando implementarmos mensageria.
 
 volumes:
   wagerflow_postgres_data:
