@@ -45,7 +45,7 @@ Dado o prazo curto e a falta de experiência prévia em Go, a estratégia de pri
 | Controle de concorrência na carteira | Update atômico condicionado (`UPDATE ... WHERE balance >= X`) | Evita lock global e locks explícitos no código; o próprio SQL garante a invariante de saldo em uma única ida ao banco, sem necessidade de retry loop. Mais simples de implementar e testar sob prazo curto do que lock pessimista ou otimista com versionamento. |
 | Router HTTP | `chi` | Só complementa o `net/http` (handlers continuam sendo `http.Handler` padrão), é leve e fácil de aprender para quem está aprendendo Go. `gin` traria convenções próprias fora do `net/http`; `http.ServeMux` puro foi a alternativa considerada, mas o `chi` dá subrotas e middlewares (`Recoverer`, `RequestID`) prontos. |
 | Composição da aplicação | Uber Fx, restrito a `cmd/api/main.go` | Exigido pelo desafio. Só a camada de composição conhece o Fx; `domain`, `application` e `infrastructure` continuam sem depender dele. |
-| Validação de tokens (Keycloak) — **decidido, ainda não implementado** | `coreos/go-oidc` + `golang-jwt/jwt` | Padrão de mercado para validar contra um IdP OIDC real (descoberta, JWKS, assinatura, expiração). Validação manual daria mais controle, mas mais código e mais risco de erro de segurança. |
+| Validação de tokens (Keycloak) | `coreos/go-oidc` + `golang-jwt/jwt` | Padrão de mercado para validar contra um IdP OIDC real (descoberta, JWKS, assinatura, expiração). Validação manual daria mais controle, mas mais código e mais risco de erro de segurança. Ver seção 4.7 para os detalhes de implementação. |
 
 ## 4. Decisões de domínio e dados
 
@@ -161,14 +161,33 @@ Implementada em `internal/interfaces/http/` (router chi, handlers, DTOs, mapeame
 
 **Consultas de repositório adicionadas para a API**: `WagerTransactionRepository.FindByID`, `WalletLedgerEntryRepository.ListByWallet` e `SumByWallet`, `DBTX.Query` (necessário para listagem multi-linha). Os fakes de teste em memória ganharam os mesmos métodos.
 
+### 4.7. Autenticação e autorização (Keycloak/OIDC)
+
+Requisito eliminatório (seção 14 do desafio). Implementado em `internal/interfaces/http/auth_middleware.go`, composto no Fx (`cmd/api/main.go`) e provisionado no `docker compose` (`deployments/keycloak/`).
+
+| Decisão | Escolha | Por quê (resumo) |
+|---|---|---|
+| Provisionamento do Keycloak | `start-dev --import-realm`, com `deployments/keycloak/realm-export.json` montado como volume | Sobe pronto, sem passo manual pela UI do Keycloak — importante porque o candidato não tem muita familiaridade com a ferramenta e o ambiente precisa ser reproduzível com `docker compose up -d`. |
+| Fluxo OAuth2 | `client_credentials`, um client por identidade (`provider-a`, `provider-b`, `wagerflow-internal`) | Comunicação serviço-a-serviço, recomendado pelo próprio desafio (seção 2); sem senha de usuário nem emissão própria de token, que estão fora do escopo. |
+| Como o `providerId` é resolvido a partir do token | Claim `azp` (authorized party) do access token — que já é, por padrão, o `client_id` de quem pediu o token no Keycloak | Evita precisar de um protocol mapper customizado no realm: cada provedor JÁ tem um client próprio, então `client_id = providerId` é suficiente. Decisão registrada como interpretação minha — o desafio não define de qual claim tirar essa identidade. |
+| Autorização | Dois realm roles: `provider` (rotas de wagering) e `internal` (rotas de wagering **e** de carteira) | A seção "Autenticação e autorização" do desafio exige "restrição das operações internas" — carteira é operação interna, então só `internal` entra lá. `internal` também pode tudo de `provider`, sem checagem de `providerId` (é o próprio serviço). |
+| Verificação do token | `go-oidc` faz o *discovery* OIDC (busca `jwks_uri` automaticamente) e confere assinatura/issuer/expiração via `provider.Verifier(&oidc.Config{SkipClientIDCheck: true})`; `golang-jwt` só decodifica as claims customizadas (`azp`, `realm_access.roles`) num tipo forte, depois que o `go-oidc` já validou o token | `SkipClientIDCheck: true` porque o `go-oidc` foi pensado para ID tokens (que têm `aud` = client_id); em `client_credentials` o access token não tem essa garantia. A checagem de identidade é feita por nós, via `azp` + role, não pela checagem de `aud` da lib. |
+| Isolamento entre provedores | Comparação explícita, dentro de cada handler de wagering, entre o `providerId` do token e o da requisição (corpo em `POST`, URL em `GET /providers/...`) | O desafio exige isolamento "inclusive em consultas e replays" — não dá para confiar no `providerId` que o cliente manda, mesmo autenticado, porque nada impede um `provider-a` autenticado de mandar `providerId: "provider-b"` no corpo. |
+| Resposta de descasamento por URL/corpo | `403 PROVIDER_MISMATCH` | O provider já está afirmando explicitamente "quero o recurso do provider X" — não há nada a esconder sobre existência, então 403 é honesto. |
+| Resposta de descasamento por id interno (`GET /wagering/transactions/:id`) | `404` (igual a "não existe"), não `403` | Aqui a URL não menciona `providerId` nenhum; devolver 403 confirmaria para um provider que aquele id EXISTE e pertence a outro alguém — a seção "Autenticação e autorização" do desafio proíbe "exposição de dados em acessos não autorizados". `404` é indistinguível de um id que nunca existiu. |
+| Health checks | Continuam sem autenticação | Health check é chamado por orquestrador/monitoramento, não por um cliente autenticado; a seção 9 não lista auth como requisito dos health checks. |
+| Testes automatizados | `auth_middleware_test.go` cobre `AuthMiddleware` e `RequireRole` com um `TokenVerifier` fake (sem Keycloak real) — 401 sem header, 401 com token inválido/expirado, 403 sem role, propagação correta de `providerId`/roles no context | A lógica de decisão (extrair Bearer, decidir 401/403, propagar identidade) é testável isoladamente da infraestrutura; validar contra o Keycloak real de verdade foi feito manualmente (ver limitação abaixo). |
+
+**Verificado manualmente** (sem Keycloak/HTTP mockado, contra os containers reais): health público sem token (200); rota protegida sem token (401 `MISSING_CREDENTIALS`); token de `provider-a` numa rota que exige `internal` (403 `FORBIDDEN`); `provider-a` consultando `providers/provider-b/...` (403 `PROVIDER_MISMATCH`); token `internal` entrando numa rota de carteira (chega até a regra de negócio, não é barrado pela auth).
+
 ## 5. Limitações conhecidas e trabalho não concluído
 
 > Esta seção deve ser mantida honesta e atualizada até a entrega final — é parte da nota de documentação (5 pts) e demonstra maturidade profissional, mesmo quando o item não foi feito por falta de tempo.
 
-Estado em 23/09/2026 (noite do dia 2 de 3). Itens abaixo ainda **não** existem (ou estão incompletos) e serão marcados como concluídos ou como limitação na entrega:
+Estado em 24/09/2026 (noite do dia 2 de 3). Itens abaixo ainda **não** existem (ou estão incompletos) e serão marcados como concluídos ou como limitação na entrega:
 
-- **Sem autenticação (Keycloak).** A API HTTP e a composição com Uber Fx existem (seção 4.6), mas **todas as rotas estão abertas**. Autenticação real é requisito eliminatório; decidido usar `coreos/go-oidc` + `golang-jwt` (seção 3). Também faltam o isolamento entre provedores (o `providerId` da requisição precisa bater com o do token, inclusive em consultas e replays) e a restrição das operações internas. Hoje `providerId` vem do corpo/rota sem verificação.
-- **A camada HTTP não tem testes automatizados.** Só foi conferido manualmente que a API sobe e que `GET /health/live` responde; as demais rotas foram escritas seguindo os casos de uso já testados, mas os handlers, o mapeamento de status e o formato do cursor ainda não têm teste próprio.
+- **A camada HTTP não tem testes automatizados de handler.** A auth tem teste próprio (`auth_middleware_test.go`, seção 4.7), mas os handlers de wallet/wager (formato do JSON, mapeamento de status, isolamento de `providerId` dentro do handler, formato do cursor) ainda são conferidos só manualmente (`curl`) e indiretamente pelos testes de `application`/domínio.
+- **Sem teste de integração automatizado contra o Keycloak real.** A validação do fluxo OIDC completo (discovery, JWKS, `client_credentials`, roles, isolamento entre provedores) foi confirmada manualmente com `curl` contra os containers reais (seção 4.7), não em `go test`. A seção 13 do desafio pede "Execute PostgreSQL, o IdP e LocalStack... em containers reais" nos testes de integração — falta migrar essa verificação manual para dentro de `test/integration/`.
 - Sem `Dockerfile` e sem a API dentro do `docker compose`: hoje o compose sobe só o Postgres, a API roda com `go run ./cmd/api` e as migrations são aplicadas manualmente. O critério `docker compose up --build` completo fica para a etapa final.
 - Sem consumidor SQS, sem escrita em inbox e sem publicação da outbox. As tabelas existem (migration 000004), mas nada as usa.
 - Os eventos de outbox já são **gravados** na mesma transação (seção 4.4) — e o teste de integração prova que isso é atômico com o estado e que replay não duplica —, mas nada os **publica** ainda: falta o worker publicador (múltiplos publishers, `FOR UPDATE SKIP LOCKED`, backoff, recuperação de trabalho abandonado, `eventId` estável em republicação) e o destino dos eventos de saída. `OutboxEvent` ainda não tem reidratação, porque a leitura da outbox será feita pelo worker.
@@ -186,7 +205,7 @@ Estado em 23/09/2026 (noite do dia 2 de 3). Itens abaixo ainda **não** existem 
 | Dia 2 | Persistência (migrations, repositórios), API HTTP, idempotência, autenticação |
 | Dia 3 | SQS (inbox/outbox), testes de concorrência/recuperação, documentação final, revisão de código limpo |
 
-### Checklist de progresso (23/09/2026, noite do dia 2)
+### Checklist de progresso (24/09/2026, noite do dia 2)
 
 - [x] Domínio puro com testes unitários (`Money`, `Wallet`, `WagerTransaction`, `WalletLedgerEntry`)
 - [x] Migrations 000001–000006 e repositórios Postgres (`pgx/v5`), `UnitOfWork`/`TxRunner`
@@ -196,8 +215,8 @@ Estado em 23/09/2026 (noite do dia 2 de 3). Itens abaixo ainda **não** existem 
 - [x] Testes de integração contra Postgres real (seção 13 do desafio), com `-race`
 - [x] API HTTP com chi + composição com Uber Fx (rotas, status HTTP, correlation id, health)
 - [x] Consultas de leitura: carteira, ledger paginado, transação (por id e por provedor + id externo), reconciliação
-- [ ] Testes automatizados da camada HTTP
-- [ ] **Autenticação Keycloak/OIDC** (eliminatório) — próximo passo
+- [x] **Autenticação Keycloak/OIDC** (eliminatório) — Keycloak provisionado no compose, middleware de validação, isolamento entre provedores, restrição das operações internas
+- [ ] Testes automatizados da camada HTTP (handlers de wallet/wager) e de integração contra o Keycloak real
 - [ ] Worker publicador da outbox + destino dos eventos de saída (LocalStack)
 - [ ] Consumidor SQS + inbox (`wager-transactions.fifo` + DLQ)
 - [ ] Worker de referências pendentes (backoff, TTL, `REFERENCE_NOT_FOUND`)

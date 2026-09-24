@@ -31,6 +31,7 @@
 - [Stack](#stack)
 - [Estrutura do repositório](#estrutura-do-repositório)
 - [Como rodar](#como-rodar)
+- [Autenticação](#autenticação)
 - [API HTTP](#api-http)
 - [Testes](#testes)
 - [Uso de IA neste projeto](#uso-de-ia-neste-projeto)
@@ -47,7 +48,7 @@ O **WagerFlow** processa operações financeiras de apostas (`BET`, `WIN`, `LOSS
 <a id="status"></a>
 ## 🚀 Status
 
-**Em desenvolvimento** — prazo de entrega: 3 dias corridos (estado em 23/09/2026, noite do dia 2).
+**Em desenvolvimento** — prazo de entrega: 3 dias corridos (estado em 24/09/2026, noite do dia 2).
 
 | Bloco | Situação |
 |---|---|
@@ -57,7 +58,7 @@ O **WagerFlow** processa operações financeiras de apostas (`BET`, `WIN`, `LOSS
 | Outbox transacional (**escrita** dos eventos na mesma transação) | ✅ Concluído |
 | Testes de integração contra Postgres real (seção 13 do desafio) | ✅ Concluído |
 | API HTTP (chi) + composição com Uber Fx | ✅ Rotas implementadas; falta cobertura de testes de handler |
-| Autenticação real (Keycloak / OIDC) — **requisito eliminatório** | ⏳ Próximo passo — hoje as rotas estão **abertas** |
+| Autenticação real (Keycloak / OIDC) — **requisito eliminatório** | ✅ Concluído — Keycloak provisionado no compose, isolamento entre provedores e restrição de operações internas |
 | Publicação da outbox + consumidor SQS + inbox | ⏳ Não iniciado |
 | Worker de referências pendentes | ⏳ Não iniciado |
 | Observabilidade, `Dockerfile`, `docker compose up` completo | ⏳ Não iniciado |
@@ -99,12 +100,13 @@ wagerflow-go/
 │   ├── config/           → leitura das variáveis de ambiente
 │   ├── domain/           → entidades e regras de negócio, sem dependência de framework
 │   ├── application/      → casos de uso, orquestração
-│   ├── infrastructure/   → Postgres (hoje); SQS e Keycloak entram nas próximas etapas
-│   └── interfaces/http/  → router chi, handlers, DTOs e mapeamento de erros para status HTTP
+│   ├── infrastructure/   → Postgres (hoje); SQS entra na próxima etapa
+│   └── interfaces/http/  → router chi, handlers, DTOs, middleware de auth (Keycloak/OIDC) e mapeamento de erros para status HTTP
 ├── migrations/           → migrations versionadas do banco
 ├── test/integration/     → testes contra Postgres real (build tag `integration`)
 ├── deployments/
-│   └── docker-compose.yml
+│   ├── docker-compose.yml
+│   └── keycloak/realm-export.json → realm provisionado automaticamente no boot do Keycloak
 └── .env.example
 ```
 
@@ -117,10 +119,12 @@ wagerflow-go/
 git clone https://github.com/raelmz/wagerflow-go.git
 cd wagerflow-go
 cp .env.example .env
-docker compose -f deployments/docker-compose.yml up -d   # Postgres (LocalStack e Keycloak entram nas próximas etapas)
+docker compose -f deployments/docker-compose.yml up -d   # Postgres + Keycloak (LocalStack entra na próxima etapa)
 ```
 
-> **Estado atual**: a API HTTP já sobe (`go run ./cmd/api`), mas **ainda sem autenticação** — o Keycloak é o próximo passo. `cmd/smoketest` é uma ferramenta descartável de conferência manual, não faz parte da aplicação final.
+> **Estado atual**: a API HTTP já sobe (`go run ./cmd/api`) com autenticação real via Keycloak. `cmd/smoketest` é uma ferramenta descartável de conferência manual, não faz parte da aplicação final.
+
+O Keycloak demora um pouco mais que o Postgres para ficar pronto na primeira vez (baixa a imagem e importa o realm). Confira com `docker ps` até os dois containers aparecerem como `healthy`.
 
 As migrations em `migrations/` são aplicadas manualmente, uma de cada vez, contra o Postgres do `docker compose` acima (**antes** de subir a API):
 
@@ -142,6 +146,47 @@ go run ./cmd/api
 ```bash
 curl http://localhost:8080/health/live
 ```
+
+<a id="autenticação"></a>
+## 🔐 Autenticação
+
+Todas as rotas de negócio exigem um access token OAuth2/OIDC válido (`Authorization: Bearer <token>`), emitido pelo Keycloak via `client_credentials`. Só `GET /health/live` e `GET /health/ready` ficam abertos.
+
+O realm `wagerflow` já vem provisionado no `docker compose` (`deployments/keycloak/realm-export.json`) com 3 clients de exemplo — o `client_id` de cada um É o `providerId` que a API reconhece:
+
+| `client_id` | `client_secret` (dev) | Role | Pode chamar |
+|---|---|---|---|
+| `provider-a` | `provider-a-secret` | `provider` | Rotas de wagering, só das próprias transações (`providerId` do token precisa bater com o da requisição) |
+| `provider-b` | `provider-b-secret` | `provider` | Idem, para `provider-b` |
+| `wagerflow-internal` | `internal-secret` | `internal` | Rotas de wagering (sem checagem de `providerId`) **e** rotas de carteira (`/wallets/...`) |
+
+Pegando um token (Keycloak publicado em `http://localhost:8081`):
+
+```bash
+curl -X POST http://localhost:8081/realms/wagerflow/protocol/openid-connect/token \
+  -d "grant_type=client_credentials" \
+  -d "client_id=provider-a" \
+  -d "client_secret=provider-a-secret"
+```
+
+O token dura 300s (`expires_in`). Use o valor de `access_token` da resposta:
+
+```bash
+curl -i http://localhost:8080/wagering/transactions/00000000-0000-0000-0000-000000000000 \
+  -H "Authorization: Bearer SEU_TOKEN_AQUI"
+```
+
+Respostas de erro relacionadas à auth:
+
+| Status | `code` | Quando |
+|---|---|---|
+| `401` | `MISSING_CREDENTIALS` | Sem header `Authorization`, ou sem o prefixo `Bearer ` |
+| `401` | `INVALID_CREDENTIALS` | Assinatura, issuer ou formato do token inválidos |
+| `401` | `EXPIRED_CREDENTIALS` | Token expirado |
+| `403` | `FORBIDDEN` | Token válido, mas sem o role exigido pela rota |
+| `403` | `PROVIDER_MISMATCH` | Token válido e com o role certo, mas o `providerId` do token não bate com o da requisição (corpo ou URL) |
+
+Consultar uma transação de OUTRO provedor pelo id interno (`GET /wagering/transactions/{id}`, sem `providerId` na URL) devolve `404`, não `403` — evita confirmar para um provedor que aquele id existe e pertence a outro (detalhes e justificativa em [`docs/PROJETO.md`](./docs/PROJETO.md#47-autenticação-e-autorização-keycloakoidc)).
 
 <a id="api-http"></a>
 ## 🌐 API HTTP
@@ -215,7 +260,7 @@ MSYS_NO_PATHCONV=1 docker run --rm --network deployments_default \
   go test -tags=integration -race ./test/integration/...
 ```
 
-> ⚠️ A camada HTTP (`internal/interfaces/http`) ainda **não tem testes automatizados**: hoje ela é coberta só indiretamente (casos de uso e integração) e por conferência manual.
+> ⚠️ A camada HTTP (`internal/interfaces/http`) ainda **não tem testes automatizados de handler** (wallet/wager): hoje é coberta só indiretamente (casos de uso e integração) e por conferência manual. O middleware de autenticação/autorização é exceção — tem teste próprio (`auth_middleware_test.go`), com um `TokenVerifier` fake, sem precisar do Keycloak real.
 
 <img src="https://capsule-render.vercel.app/api?type=rect&color=0:0d1117,50:1f6feb,100:2ea043&height=4&section=header" width="100%" />
 
