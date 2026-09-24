@@ -20,7 +20,7 @@ type DBTX interface {
 }
 
 // unitOfWork é a implementação real de domain.UnitOfWork: constrói
-// os 3 repositórios sempre por cima do MESMO pgx.Tx, garantindo que
+// os repositórios sempre por cima do MESMO pgx.Tx, garantindo que
 // todos enxerguem as mesmas mudanças ainda não commitadas.
 type unitOfWork struct {
 	tx DBTX
@@ -33,6 +33,7 @@ func (u *unitOfWork) WagerTransactions() domain.WagerTransactionRepository {
 func (u *unitOfWork) LedgerEntries() domain.WalletLedgerEntryRepository {
 	return NewWalletLedgerEntryRepository(u.tx)
 }
+func (u *unitOfWork) Outbox() domain.OutboxRepository { return NewOutboxRepository(u.tx) }
 
 // TxManager implementa domain.TxRunner usando transações reais do
 // Postgres via pgx.

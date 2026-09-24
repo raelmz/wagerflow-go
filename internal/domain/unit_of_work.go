@@ -12,6 +12,11 @@ type UnitOfWork interface {
 	Wallets() WalletRepository
 	WagerTransactions() WagerTransactionRepository
 	LedgerEntries() WalletLedgerEntryRepository
+
+	// Outbox grava eventos de integração NA MESMA transação das
+	// demais alterações — é isso que garante "evento só existe se o
+	// fato foi confirmado, e todo fato confirmado tem seu evento".
+	Outbox() OutboxRepository
 }
 
 // TxRunner é o que o caso de uso realmente depende — não sabe se por

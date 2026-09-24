@@ -26,6 +26,7 @@ type memStore struct {
 	wallets map[uuid.UUID]*domain.Wallet
 	txs     map[uuid.UUID]*domain.WagerTransaction
 	entries []*domain.WalletLedgerEntry
+	events  []*domain.OutboxEvent
 }
 
 func newMemStore() *memStore {
@@ -52,6 +53,7 @@ func (u *memUoW) WagerTransactions() domain.WagerTransactionRepository {
 func (u *memUoW) LedgerEntries() domain.WalletLedgerEntryRepository {
 	return &memLedgerRepo{u.store}
 }
+func (u *memUoW) Outbox() domain.OutboxRepository { return &memOutboxRepo{u.store} }
 
 // --- Carteiras ---
 
@@ -187,6 +189,15 @@ func (r *memLedgerRepo) Create(_ context.Context, e *domain.WalletLedgerEntry) e
 	return nil
 }
 
+// --- Outbox ---
+
+type memOutboxRepo struct{ s *memStore }
+
+func (r *memOutboxRepo) Append(_ context.Context, e *domain.OutboxEvent) error {
+	r.s.events = append(r.s.events, e)
+	return nil
+}
+
 // --- Auxiliares de conferência para os testes ---
 
 func (s *memStore) ledgerCount() int {
@@ -199,4 +210,23 @@ func (s *memStore) wallet(id uuid.UUID) *domain.Wallet {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cloneWallet(s.wallets[id])
+}
+
+// eventTypes devolve os tipos dos eventos gravados, na ordem em que
+// foram gravados.
+func (s *memStore) eventTypes() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	types := make([]string, 0, len(s.events))
+	for _, e := range s.events {
+		types = append(types, e.Type())
+	}
+	return types
+}
+
+// outboxEvents devolve uma cópia da lista de eventos gravados.
+func (s *memStore) outboxEvents() []*domain.OutboxEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*domain.OutboxEvent(nil), s.events...)
 }

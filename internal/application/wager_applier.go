@@ -112,7 +112,18 @@ func applyMovement(
 	if err := txn.MarkProcessed(after); err != nil {
 		return err
 	}
-	return uow.WagerTransactions().Update(ctx, txn)
+	if err := uow.WagerTransactions().Update(ctx, txn); err != nil {
+		return err
+	}
+
+	// Eventos na MESMA transação (outbox transacional): a operação
+	// concluída e a mudança de saldo. O WalletBalanceChanged aponta o
+	// Processed como causa e leva a versão da carteira pós-mudança.
+	processedEventID, err := emitProcessed(ctx, uow, txn)
+	if err != nil {
+		return err
+	}
+	return emitBalanceChanged(ctx, uow, txn, entry, wallet.Version(), processedEventID)
 }
 
 // applyLoss conclui uma LOSS: sem movimentação, sem ledger e sem mexer
@@ -128,7 +139,14 @@ func applyLoss(ctx context.Context, uow domain.UnitOfWork, txn *domain.WagerTran
 	if err := txn.MarkProcessed(wallet.Balance()); err != nil {
 		return err
 	}
-	return uow.WagerTransactions().Update(ctx, txn)
+	if err := uow.WagerTransactions().Update(ctx, txn); err != nil {
+		return err
+	}
+
+	// LOSS gera só WagerTransactionProcessed: o saldo não mudou, então
+	// não há WalletBalanceChanged (seção 7 do desafio).
+	_, err = emitProcessed(ctx, uow, txn)
+	return err
 }
 
 // applyWithReference cobre REFUND, ROLLBACK e WIN com referência.
@@ -247,12 +265,28 @@ func reject(ctx context.Context, uow domain.UnitOfWork, txn *domain.WagerTransac
 	if err := txn.MarkRejected(failureCode); err != nil {
 		return err
 	}
-	return uow.WagerTransactions().Update(ctx, txn)
+	if err := uow.WagerTransactions().Update(ctx, txn); err != nil {
+		return err
+	}
+	return emitRejected(ctx, uow, txn)
 }
 
 func markPendingReference(ctx context.Context, uow domain.UnitOfWork, txn *domain.WagerTransaction) error {
+	// O evento de "esperando referência" é emitido só na PRIMEIRA vez
+	// que a transação entra nesse estado. Quando o worker de referências
+	// pendentes reaplicar uma transação que já estava PENDING_REFERENCE
+	// e a referência continuar indisponível, ela só segue esperando —
+	// sem publicar o mesmo aviso a cada tentativa.
+	firstTime := txn.Status() == domain.StatusPending
+
 	if err := txn.MarkPendingReference(); err != nil {
 		return err
 	}
-	return uow.WagerTransactions().Update(ctx, txn)
+	if err := uow.WagerTransactions().Update(ctx, txn); err != nil {
+		return err
+	}
+	if !firstTime {
+		return nil
+	}
+	return emitPendingReference(ctx, uow, txn)
 }

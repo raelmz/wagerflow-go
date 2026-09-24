@@ -69,7 +69,18 @@ func (uc *OpenWalletUseCase) Execute(ctx context.Context, playerID uuid.UUID, in
 		if err != nil {
 			return err
 		}
-		return uow.LedgerEntries().Create(ctx, entry)
+		if err := uow.LedgerEntries().Create(ctx, entry); err != nil {
+			return err
+		}
+
+		// Eventos de abertura no MESMO commit da carteira (seção 9).
+		// São de origem interna: sem provedor, id externo, rodada etc.
+		// A versão da carteira nesta abertura é 1.
+		processedEventID, err := emitProcessed(ctx, uow, openingTx)
+		if err != nil {
+			return err
+		}
+		return emitBalanceChanged(ctx, uow, openingTx, entry, wallet.Version(), processedEventID)
 	})
 	if err != nil {
 		return nil, err
