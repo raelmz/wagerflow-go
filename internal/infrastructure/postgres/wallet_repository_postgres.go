@@ -8,9 +8,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/raelmz/wagerflow-go/internal/domain"
 )
+
+// Nome da constraint única (playerId, currency) — migration 000001.
+const uniqueWalletPlayerCurrencyConstraint = "uq_wallets_player_currency"
 
 // WalletRepository é a implementação real (Postgres) da interface
 // domain.WalletRepository. Repare que o campo agora é DBTX, não mais
@@ -36,6 +40,13 @@ func (r *WalletRepository) Create(ctx context.Context, wallet *domain.Wallet) er
 		wallet.CreatedAt(), wallet.UpdatedAt(),
 	)
 	if err != nil {
+		// Violação da constraint (playerId, currency): já existe
+		// carteira para este par. A seção 9 do desafio exige que essa
+		// tentativa vire conflito, não um erro genérico de banco.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == uniqueWalletPlayerCurrencyConstraint {
+			return domain.ErrWalletAlreadyExists
+		}
 		return fmt.Errorf("falha ao inserir carteira: %w", err)
 	}
 	return nil

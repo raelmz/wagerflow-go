@@ -17,6 +17,11 @@ import (
 type DBTX interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+
+	// Query é usado pelas novas leituras multi-linha (ex: paginação
+	// do ledger). *pgxpool.Pool e pgx.Tx satisfazem os dois com essa
+	// mesma assinatura, então nada muda para quem já usa DBTX.
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 // unitOfWork é a implementação real de domain.UnitOfWork: constrói

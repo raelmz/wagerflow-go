@@ -170,6 +170,16 @@ func (r *memWagerRepo) LockByProviderAndExternalTxID(ctx context.Context, provid
 	return r.FindByProviderAndExternalTxID(ctx, providerID, externalID)
 }
 
+// FindByID imita a leitura por ID interno (GET /wagering/transactions/:id).
+// Mesma convenção do Postgres: não achou → (nil, nil).
+func (r *memWagerRepo) FindByID(_ context.Context, id uuid.UUID) (*domain.WagerTransaction, error) {
+	t, ok := r.s.txs[id]
+	if !ok {
+		return nil, nil
+	}
+	return cloneTx(t), nil
+}
+
 func (r *memWagerRepo) HasProcessedReversalOf(_ context.Context, referenceID uuid.UUID) (bool, error) {
 	for _, t := range r.s.txs {
 		isReversalKind := t.Kind() == domain.KindRefund || t.Kind() == domain.KindRollback
@@ -187,6 +197,41 @@ type memLedgerRepo struct{ s *memStore }
 func (r *memLedgerRepo) Create(_ context.Context, e *domain.WalletLedgerEntry) error {
 	r.s.entries = append(r.s.entries, e)
 	return nil
+}
+
+// ListByWallet devolve os lançamentos da carteira na ordem de gravação.
+// O fake não implementa cursor de verdade (a paginação real é coberta
+// no Postgres); aqui só precisa satisfazer a interface. Se algum teste
+// unitário passar a depender de paginação, implemente-a aqui.
+func (r *memLedgerRepo) ListByWallet(_ context.Context, walletID uuid.UUID, _ string, limit int) ([]*domain.WalletLedgerEntry, string, error) {
+	var out []*domain.WalletLedgerEntry
+	for _, e := range r.s.entries {
+		if e.WalletID() == walletID {
+			out = append(out, e)
+		}
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, "", nil
+}
+
+// SumByWallet: créditos - débitos, igual ao SQL da versão Postgres.
+func (r *memLedgerRepo) SumByWallet(_ context.Context, walletID uuid.UUID) (int64, int, error) {
+	var net int64
+	count := 0
+	for _, e := range r.s.entries {
+		if e.WalletID() != walletID {
+			continue
+		}
+		count++
+		if e.Direction() == domain.DirectionCredit {
+			net += e.Amount().Cents()
+		} else {
+			net -= e.Amount().Cents()
+		}
+	}
+	return net, count, nil
 }
 
 // --- Outbox ---

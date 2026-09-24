@@ -133,6 +133,12 @@ func (r *WagerTransactionRepository) Update(ctx context.Context, tx *domain.Wage
 	return nil
 }
 
+// FindByID busca pelo ID interno — usado por GET /wagering/transactions/:transactionId.
+func (r *WagerTransactionRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.WagerTransaction, error) {
+	row := r.db.QueryRow(ctx, selectWagerTransactionSQL+` WHERE id = $1`, id)
+	return scanWagerTransaction(row)
+}
+
 func (r *WagerTransactionRepository) FindByProviderAndIdempotencyKey(ctx context.Context, providerID, idempotencyKey string) (*domain.WagerTransaction, error) {
 	row := r.db.QueryRow(ctx, selectWagerTransactionSQL+` WHERE provider_id = $1 AND idempotency_key = $2`, providerID, idempotencyKey)
 	return scanWagerTransaction(row)

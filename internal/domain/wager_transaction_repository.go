@@ -35,4 +35,11 @@ type WagerTransactionRepository interface {
 	// HasProcessedReversalOf diz se a transação referenceID já recebeu
 	// uma reversão (REFUND ou ROLLBACK) em estado PROCESSED.
 	HasProcessedReversalOf(ctx context.Context, referenceID uuid.UUID) (bool, error)
+
+	// FindByID busca uma transação pelo ID interno. Usado pela leitura
+	// HTTP GET /wagering/transactions/:transactionId (seção 9).
+	// Retorna (nil, nil) se não encontrar — mesma convenção de
+	// WalletRepository.FindByID: "não encontrado" não é um erro Go,
+	// é um resultado possível que quem chama decide como tratar.
+	FindByID(ctx context.Context, id uuid.UUID) (*WagerTransaction, error)
 }

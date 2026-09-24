@@ -12,6 +12,13 @@ var (
 	ErrInsufficientBalance    = errors.New("saldo insuficiente")
 	ErrInvalidPlayerID        = errors.New("playerId inválido")
 	ErrWalletCurrencyMismatch = errors.New("a moeda da operação não corresponde à moeda da carteira")
+
+	// ErrWalletAlreadyExists: já existe carteira para este par
+	// (playerId, currency) — a seção 9 do desafio exige conflito ao
+	// tentar abrir outra carteira igual. O banco garante a unicidade
+	// (constraint uq_wallets_player_currency); o repositório traduz
+	// a violação para este erro de domínio.
+	ErrWalletAlreadyExists = errors.New("já existe carteira para este jogador e moeda")
 )
 
 // --- Conceito Go 6: ponteiro (*Wallet) ---
