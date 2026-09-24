@@ -15,6 +15,17 @@ type errInvalidInput struct{ msg string }
 
 func (e errInvalidInput) Error() string { return e.msg }
 
+// errForbidden representa um descasamento de isolamento entre
+// provedores detectado NESTA camada: o providerId do token (claim
+// "azp") não bate com o providerId da requisição (corpo ou URL,
+// dependendo da rota — ver wager_handler.go). Sempre 403. Diferente
+// de RequireRole (que barra por FALTA de role antes mesmo de chegar
+// no handler), este erro é sobre uma identidade AUTENTICADA e com o
+// role certo, mas tentando mexer na transação de outro provedor.
+type errForbidden struct{ msg string }
+
+func (e errForbidden) Error() string { return e.msg }
+
 // apiErrorBody é o corpo de erro padrão da API. `code` é estável e
 // pensado para o cliente decidir programaticamente o que fazer;
 // `message` é só para humano/log.
@@ -41,6 +52,9 @@ func mapError(err error) (int, apiErrorBody) {
 	switch {
 	case errors.As(err, &errInvalidInput{}):
 		return http.StatusBadRequest, apiErrorBody{Code: "INVALID_INPUT", Message: err.Error()}
+
+	case errors.As(err, &errForbidden{}):
+		return http.StatusForbidden, apiErrorBody{Code: "PROVIDER_MISMATCH", Message: err.Error()}
 
 	case errors.Is(err, domain.ErrInvalidAmount),
 		errors.Is(err, domain.ErrNegativeAmount),

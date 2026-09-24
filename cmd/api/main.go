@@ -35,6 +35,7 @@ func main() {
 			newWalletRepository,
 			newWagerTransactionRepository,
 			newWalletLedgerEntryRepository,
+			newTokenVerifier,
 
 			application.NewOpenWalletUseCase,
 			application.NewGetWalletUseCase,
@@ -73,6 +74,19 @@ func newPool(lc fx.Lifecycle, cfg *config.Config) (*pgxpool.Pool, error) {
 	})
 
 	return pool, nil
+}
+
+// newTokenVerifier monta o verificador OIDC (Keycloak) a partir da
+// issuer URL configurada. Faz discovery na hora do boot (busca
+// jwks_uri em /.well-known/openid-configuration) — por isso o
+// timeout: se o Keycloak não estiver de pé ainda, a aplicação falha
+// rápido com um erro claro em vez de subir "quebrada" e só falhar na
+// primeira requisição autenticada.
+func newTokenVerifier(cfg *config.Config) (wfhttp.TokenVerifier, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	return wfhttp.NewOIDCVerifier(ctx, cfg.KeycloakIssuerURL)
 }
 
 // As funções abaixo só existem para "converter" o tipo concreto

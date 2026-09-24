@@ -38,6 +38,22 @@ func (h *WagerHandler) Process(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Isolamento entre provedores (seção "Autenticação e
+	// autorização" do desafio): o providerId do TOKEN (claim "azp",
+	// já validado pelo AuthMiddleware) precisa bater com o
+	// providerId que veio no CORPO da requisição. Sem essa checagem,
+	// um provider autenticado poderia processar operação em nome de
+	// outro só preenchendo outro providerId no JSON. O role
+	// "internal" fica de fora dessa regra de propósito (é o serviço
+	// interno, não "é dono" de um provider só).
+	if !IsInternal(r.Context()) {
+		tokenProviderID, _ := AuthenticatedProviderID(r.Context())
+		if req.ProviderID != tokenProviderID {
+			writeError(w, errForbidden{msg: "providerId do token não corresponde ao providerId da requisição"})
+			return
+		}
+	}
+
 	playerID, err := parseUUID(req.PlayerID)
 	if err != nil {
 		writeError(w, err)
@@ -109,6 +125,21 @@ func (h *WagerHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Isolamento entre provedores também vale para replay/consulta
+	// por id interno (a seção "Autenticação e autorização" do
+	// desafio é explícita: "inclusive em consultas e replays"). Aqui
+	// devolvemos 404 em vez de 403: um provider tentando adivinhar
+	// ids de outro provider não pode nem CONFIRMAR que aquele id
+	// existe — é a mesma resposta que ele receberia para um id que
+	// nunca existiu.
+	if !IsInternal(r.Context()) {
+		tokenProviderID, _ := AuthenticatedProviderID(r.Context())
+		if tx.ProviderID() != tokenProviderID {
+			writeError(w, application.ErrWagerTransactionNotFound)
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusOK, wagerTransactionToResponse(tx))
 }
 
@@ -117,6 +148,21 @@ func (h *WagerHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 func (h *WagerHandler) GetByProviderAndExternalID(w http.ResponseWriter, r *http.Request) {
 	providerID := chi.URLParam(r, "providerId")
 	externalTransactionID := chi.URLParam(r, "externalTransactionId")
+
+	// Aqui o providerId já vem na URL, então a checagem acontece
+	// ANTES de consultar o banco (não precisa nem gastar uma query
+	// para um provider pedindo o recurso de outro provider — a URL
+	// já denuncia a tentativa, então 403 é a resposta certa, não 404:
+	// diferente do GetByID acima, aqui o provider já está afirmando
+	// "quero o providerId X", então não há nada a esconder sobre
+	// existência).
+	if !IsInternal(r.Context()) {
+		tokenProviderID, _ := AuthenticatedProviderID(r.Context())
+		if providerID != tokenProviderID {
+			writeError(w, errForbidden{msg: "providerId do token não corresponde ao providerId da URL"})
+			return
+		}
+	}
 
 	tx, err := h.getTransaction.ByProviderAndExternalID(r.Context(), providerID, externalTransactionID)
 	if err != nil {
