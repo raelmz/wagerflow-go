@@ -43,6 +43,9 @@ Dado o prazo curto e a falta de experiência prévia em Go, a estratégia de pri
 | Decisão | Escolha | Por quê (resumo) |
 |---|---|---|
 | Controle de concorrência na carteira | Update atômico condicionado (`UPDATE ... WHERE balance >= X`) | Evita lock global e locks explícitos no código; o próprio SQL garante a invariante de saldo em uma única ida ao banco, sem necessidade de retry loop. Mais simples de implementar e testar sob prazo curto do que lock pessimista ou otimista com versionamento. |
+| Router HTTP | `chi` | Só complementa o `net/http` (handlers continuam sendo `http.Handler` padrão), é leve e fácil de aprender para quem está aprendendo Go. `gin` traria convenções próprias fora do `net/http`; `http.ServeMux` puro foi a alternativa considerada, mas o `chi` dá subrotas e middlewares (`Recoverer`, `RequestID`) prontos. |
+| Composição da aplicação | Uber Fx, restrito a `cmd/api/main.go` | Exigido pelo desafio. Só a camada de composição conhece o Fx; `domain`, `application` e `infrastructure` continuam sem depender dele. |
+| Validação de tokens (Keycloak) — **decidido, ainda não implementado** | `coreos/go-oidc` + `golang-jwt/jwt` | Padrão de mercado para validar contra um IdP OIDC real (descoberta, JWKS, assinatura, expiração). Validação manual daria mais controle, mas mais código e mais risco de erro de segurança. |
 
 ## 4. Decisões de domínio e dados
 
@@ -136,17 +139,41 @@ Escrever estes testes encontrou 3 bugs reais, todos corrigidos:
 2. **`TRUNCATE` na ledger não era bloqueado** — a migration 000003 criou triggers `BEFORE UPDATE`/`BEFORE DELETE`, do tipo `FOR EACH ROW`. `TRUNCATE` é um comando de outra categoria (nível de comando, não de linha): nenhum dos dois triggers dispara, e a tabela append-only podia ser esvaziada sem erro nenhum. Corrigido pela migration `000006`, um terceiro trigger `BEFORE TRUNCATE ... FOR EACH STATEMENT`, reaproveitando a mesma função `prevent_ledger_mutation()`.
 3. **`Money`: `"-0.50"` virava `+0.50`; `"25.+5"` virava `25.05`** — a validação antiga rejeitava negativo checando se a parte inteira (`wholePart`) era `< 0`; para `"-0.50"`, essa parte é `"-0"`, que o `ParseInt` lê como `0` — nem positivo nem negativo — então o sinal era perdido silenciosamente. Da mesma forma, a parte decimal era passada direto para `ParseInt`, que aceita um `"+"` de propósito (`"+5"` é um `int64` válido), então `"25.+5"` virava `25.05` em vez de ser rejeitado. Corrigido tratando o sinal separadamente ANTES de dividir em parte inteira/decimal, e exigindo que as duas partes sejam só dígitos. Também foram adicionados `Money.Negate()` (exigido pela seção 6.1) e checagem de overflow em `Add`/`Subtract` (havia um `TODO` no código antigo).
 
+### 4.6. API HTTP
+
+Implementada em `internal/interfaces/http/` (router chi, handlers, DTOs, mapeamento de erros) e composta com Uber Fx em `cmd/api/main.go`. Rotas e tabela de status também estão resumidas no README.
+
+| Decisão | Escolha | Por quê (resumo) |
+|---|---|---|
+| Handlers finos | Handler só converte HTTP ↔ caso de uso (JSON, UUID, header) e devolve o status; regra de negócio fica em `domain`/`application` | Mantém o isolamento de framework exigido pelo desafio: trocar chi por outra coisa não toca em regra alguma. |
+| Dinheiro no JSON | Sempre string decimal (`"25.00"`) num objeto `{amount, currency}` | Um `number` JSON vira `float` na maioria dos clientes; a seção 6.1 proíbe float em qualquer ponto do contrato. |
+| `Idempotency-Key` | Header obrigatório em `POST /wagering/transactions`; o servidor **nunca** o substitui por um valor calculado | Seção 9 do desafio. Header ausente = `400`. |
+| Rejeição de negócio não é erro HTTP | `REJECTED` volta como `200` com o resultado; replay também é `200` | A operação foi aceita e avaliada; a recusa é o resultado (e o replay devolve o mesmo resultado, de forma estável). |
+| Distinguibilidade do contrato | `201` processada · `202` aguardando referência · `200` replay/rejeitada · `400` entrada inválida · `404` não encontrado · `409` conflito · `422` regra de negócio · `503` falha transitória | A seção 9 exige que cada situação seja distinguível pelo contrato. Corpo de erro padrão `{code, message}` com `code` estável para o cliente decidir programaticamente. |
+| Erros não classificados | Viram `503` com mensagem genérica | Assume-se falha transitória: a transação SQL foi desfeita, então repetir com a mesma chave é seguro. A mensagem interna não vaza para o cliente. |
+| Conflitos | Chave de idempotência com payload diferente, id externo usado por outra chave, carteira duplicada (`uq_wallets_player_currency` → `ErrWalletAlreadyExists`) e `ErrDuplicateTransaction` que escape → `409` | Mapeados por `errors.Is` sobre erros do domínio, sem o handler conhecer o banco. |
+| Correlation id | Middleware lê/gera `X-Correlation-Id`, devolve no header e coloca no `context` via `application.WithCorrelationID` | O mesmo id vai para os eventos da outbox (seção 4.4); reaproveitável nos logs. |
+| Paginação do ledger | Cursor opaco (base64 de `createdAt\|id`), ordem estável `(createdAt, id)` crescente, pede `limit+1` linhas para saber se há próxima página | Sem `COUNT` extra e sem expor o formato do cursor ao cliente. |
+| Reconciliação | `POST /wallets/{id}/reconciliation` lê a carteira e soma o ledger na **mesma transação** (`SumByWallet`), sem alterar nada | Compara saldo armazenado × saldo reconstruído numa visão consistente dos dados (seção 9). |
+| Health | `live` = processo vivo (sem dependências); `ready` = Postgres respondendo (`Ping`) | Um banco fora do ar não deve fazer o orquestrador reiniciar a aplicação à toa. SQS entra em `ready` quando existir. |
+| Configuração | `internal/config` é o único lugar que conhece os nomes das variáveis (`DATABASE_URL` obrigatória, `HTTP_PORT` padrão `8080`); `.env` carregado só em `main` | Nenhum `os.Getenv` espalhado; `config` testável sem arquivo em disco. |
+| Encerramento | Fx fecha o pool no `OnStop`; o servidor HTTP faz shutdown gracioso (10 s) | Requisições em andamento terminam antes de as conexões serem derrubadas. |
+
+**Consultas de repositório adicionadas para a API**: `WagerTransactionRepository.FindByID`, `WalletLedgerEntryRepository.ListByWallet` e `SumByWallet`, `DBTX.Query` (necessário para listagem multi-linha). Os fakes de teste em memória ganharam os mesmos métodos.
+
 ## 5. Limitações conhecidas e trabalho não concluído
 
 > Esta seção deve ser mantida honesta e atualizada até a entrega final — é parte da nota de documentação (5 pts) e demonstra maturidade profissional, mesmo quando o item não foi feito por falta de tempo.
 
-Estado em 23/09/2026 (noite do dia 2 de 3). Itens abaixo ainda **não** existem e serão marcados como concluídos ou como limitação na entrega:
+Estado em 23/09/2026 (noite do dia 2 de 3). Itens abaixo ainda **não** existem (ou estão incompletos) e serão marcados como concluídos ou como limitação na entrega:
 
-- Sem API HTTP, sem composição com Uber Fx e sem autenticação (Keycloak). Autenticação real é requisito eliminatório.
+- **Sem autenticação (Keycloak).** A API HTTP e a composição com Uber Fx existem (seção 4.6), mas **todas as rotas estão abertas**. Autenticação real é requisito eliminatório; decidido usar `coreos/go-oidc` + `golang-jwt` (seção 3). Também faltam o isolamento entre provedores (o `providerId` da requisição precisa bater com o do token, inclusive em consultas e replays) e a restrição das operações internas. Hoje `providerId` vem do corpo/rota sem verificação.
+- **A camada HTTP não tem testes automatizados.** Só foi conferido manualmente que a API sobe e que `GET /health/live` responde; as demais rotas foram escritas seguindo os casos de uso já testados, mas os handlers, o mapeamento de status e o formato do cursor ainda não têm teste próprio.
+- Sem `Dockerfile` e sem a API dentro do `docker compose`: hoje o compose sobe só o Postgres, a API roda com `go run ./cmd/api` e as migrations são aplicadas manualmente. O critério `docker compose up --build` completo fica para a etapa final.
 - Sem consumidor SQS, sem escrita em inbox e sem publicação da outbox. As tabelas existem (migration 000004), mas nada as usa.
 - Os eventos de outbox já são **gravados** na mesma transação (seção 4.4) — e o teste de integração prova que isso é atômico com o estado e que replay não duplica —, mas nada os **publica** ainda: falta o worker publicador (múltiplos publishers, `FOR UPDATE SKIP LOCKED`, backoff, recuperação de trabalho abandonado, `eventId` estável em republicação) e o destino dos eventos de saída. `OutboxEvent` ainda não tem reidratação, porque a leitura da outbox será feita pelo worker.
 - Sem worker de referências pendentes (o caso de uso já grava `PENDING_REFERENCE`, mas nada as retoma; faltam tentativas e próximo retry, que exigem migration).
-- Sem endpoints de leitura, reconciliação e health checks; faltam as consultas de repositório correspondentes (busca por id, ledger paginado).
+- `GET /health/ready` verifica só o Postgres; a checagem do SQS entra junto com o consumidor.
 - Sem observabilidade (logs JSON, métricas).
 - Os testes de integração (seção 4.5) cobrem os cenários obrigatórios da seção 13, mas não incluem ainda o teste "negativo" descrito nela — remover de propósito o `FOR UPDATE`/a condição de saldo no `WHERE` e confirmar que o teste correspondente falha. É uma checagem manual, não automatizada no CI.
 - O `ARCHITECTURE.md` exigido na seção 15 do desafio ainda não existe; este `PROJETO.md` será a base dele.
@@ -158,6 +185,24 @@ Estado em 23/09/2026 (noite do dia 2 de 3). Itens abaixo ainda **não** existem 
 | Dia 1 | Fundamentos de Go necessários + decisões de arquitetura + domínio puro (Money, Wallet, WagerTransaction, LedgerEntry) com testes unitários |
 | Dia 2 | Persistência (migrations, repositórios), API HTTP, idempotência, autenticação |
 | Dia 3 | SQS (inbox/outbox), testes de concorrência/recuperação, documentação final, revisão de código limpo |
+
+### Checklist de progresso (23/09/2026, noite do dia 2)
+
+- [x] Domínio puro com testes unitários (`Money`, `Wallet`, `WagerTransaction`, `WalletLedgerEntry`)
+- [x] Migrations 000001–000006 e repositórios Postgres (`pgx/v5`), `UnitOfWork`/`TxRunner`
+- [x] Caso de uso central `BET`/`WIN`/`LOSS`/`REFUND`/`ROLLBACK` com idempotência persistente
+- [x] Abertura de carteira (`POST /wallets`) com lançamento de abertura no ledger
+- [x] Outbox transacional — escrita dos eventos na mesma transação
+- [x] Testes de integração contra Postgres real (seção 13 do desafio), com `-race`
+- [x] API HTTP com chi + composição com Uber Fx (rotas, status HTTP, correlation id, health)
+- [x] Consultas de leitura: carteira, ledger paginado, transação (por id e por provedor + id externo), reconciliação
+- [ ] Testes automatizados da camada HTTP
+- [ ] **Autenticação Keycloak/OIDC** (eliminatório) — próximo passo
+- [ ] Worker publicador da outbox + destino dos eventos de saída (LocalStack)
+- [ ] Consumidor SQS + inbox (`wager-transactions.fifo` + DLQ)
+- [ ] Worker de referências pendentes (backoff, TTL, `REFERENCE_NOT_FOUND`)
+- [ ] Testes de recuperação de falha e multi-instância; observabilidade básica
+- [ ] `Dockerfile`, `docker compose up --build` completo, `ARCHITECTURE.md`, revisão final da documentação
 
 ---
 
