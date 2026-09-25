@@ -120,10 +120,22 @@ func (r *WagerTransactionRepository) Create(ctx context.Context, tx *domain.Wage
 func (r *WagerTransactionRepository) Update(ctx context.Context, tx *domain.WagerTransaction) error {
 	resulting, hasResulting := tx.ResultingBalance()
 
+	// reference_first_pending_at/reference_next_retry_at só importam
+	// para o worker de referências pendentes (migration 000007). Na
+	// PRIMEIRA vez que a transação entra em PENDING_REFERENCE eles são
+	// inicializados (now(), now() — imediatamente reivindicável); nas
+	// vezes seguintes o COALESCE preserva o valor que o worker já
+	// tiver agendado via MarkRetryScheduled. Ao sair de
+	// PENDING_REFERENCE, reference_next_retry_at é limpo (não há mais
+	// nada a agendar); reference_first_pending_at fica, como histórico.
 	_, err := r.db.Exec(ctx, `
 		UPDATE wager_transactions
 		SET status = $1, failure_code = $2, reference_transaction_id = $3,
-		    resulting_balance_cents = $4, updated_at = $5
+		    resulting_balance_cents = $4, updated_at = $5,
+		    reference_first_pending_at = CASE WHEN $1 = 'PENDING_REFERENCE'
+		        THEN COALESCE(reference_first_pending_at, now()) ELSE reference_first_pending_at END,
+		    reference_next_retry_at = CASE WHEN $1 = 'PENDING_REFERENCE'
+		        THEN COALESCE(reference_next_retry_at, now()) ELSE NULL END
 		WHERE id = $6
 	`, string(tx.Status()), nullableText(tx.FailureCode()), nullableUUID(tx.ResolvedReferenceID()),
 		nullableCents(resulting, hasResulting), tx.UpdatedAt(), tx.ID())
