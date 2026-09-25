@@ -66,8 +66,10 @@ func TestConsumidor_ProcessaMensagemNova(t *testing.T) {
 	if got := walletBalance(t, h.pool, walletID); got != 7000 {
 		t.Fatalf("saldo esperado 7000 centavos, obtido %d", got)
 	}
-	if got := ledgerCount(t, h.pool, walletID); got != 1 {
-		t.Fatalf("esperava 1 lançamento no ledger, obtido %d", got)
+	// 2 lançamentos: crédito de abertura (openWallet com saldo > 0) +
+	// débito do BET processado pelo consumidor.
+	if got := ledgerCount(t, h.pool, walletID); got != 2 {
+		t.Fatalf("esperava 2 lançamentos no ledger (abertura + BET), obtido %d", got)
 	}
 	if got := inboxCount(t, h.pool, "wager-consumer"); got != 1 {
 		t.Fatalf("esperava 1 registro na inbox, obtido %d", got)
@@ -108,8 +110,10 @@ func TestConsumidor_ReentregaDaMesmaMensagemNaoReprocessa(t *testing.T) {
 	if got := walletBalance(t, h.pool, walletID); got != 6000 {
 		t.Fatalf("saldo esperado 6000 centavos (1 débito só), obtido %d", got)
 	}
-	if got := ledgerCount(t, h.pool, walletID); got != 1 {
-		t.Fatalf("esperava 1 lançamento no ledger (sem duplicar), obtido %d", got)
+	// 2 lançamentos: crédito de abertura + o único débito do BET (a
+	// reentrega não deve acrescentar um terceiro).
+	if got := ledgerCount(t, h.pool, walletID); got != 2 {
+		t.Fatalf("esperava 2 lançamentos no ledger (abertura + BET, sem duplicar), obtido %d", got)
 	}
 }
 
@@ -149,8 +153,8 @@ func TestConsumidor_MesmaOperacaoPorMensagensDiferentesEhReplay(t *testing.T) {
 	if got := inboxCount(t, h.pool, "wager-consumer"); got != 2 {
 		t.Fatalf("esperava 2 registros na inbox (mensagens distintas), obtido %d", got)
 	}
-	if got := ledgerCount(t, h.pool, walletID); got != 1 {
-		t.Fatalf("esperava 1 lançamento no ledger, obtido %d", got)
+	if got := ledgerCount(t, h.pool, walletID); got != 2 {
+		t.Fatalf("esperava 2 lançamentos no ledger (abertura + BET), obtido %d", got)
 	}
 }
 
@@ -191,8 +195,10 @@ func TestConsumidor_MensagensConcorrentesDaMesmaOperacaoSoDebitaUmaVez(t *testin
 	if got := walletBalance(t, h.pool, walletID); got != 9000 {
 		t.Fatalf("saldo esperado 9000 centavos (1 débito só entre %d concorrentes), obtido %d", n, got)
 	}
-	if got := ledgerCount(t, h.pool, walletID); got != 1 {
-		t.Fatalf("esperava 1 lançamento no ledger entre %d concorrentes, obtido %d", n, got)
+	// 2 lançamentos: crédito de abertura + o único débito que venceu a
+	// corrida entre as N mensagens concorrentes.
+	if got := ledgerCount(t, h.pool, walletID); got != 2 {
+		t.Fatalf("esperava 2 lançamentos no ledger (abertura + 1 débito) entre %d concorrentes, obtido %d", n, got)
 	}
 }
 
