@@ -33,6 +33,7 @@
 - [Como rodar](#como-rodar)
 - [Autenticação](#autenticação)
 - [API HTTP](#api-http)
+- [Mensageria (SQS)](#mensageria-sqs)
 - [Testes](#testes)
 - [Uso de IA neste projeto](#uso-de-ia-neste-projeto)
 
@@ -48,7 +49,7 @@ O **WagerFlow** processa operações financeiras de apostas (`BET`, `WIN`, `LOSS
 <a id="status"></a>
 ## 🚀 Status
 
-**Em desenvolvimento** — prazo de entrega: 3 dias corridos (estado em 24/09/2026, noite do dia 2).
+**Em desenvolvimento** — prazo de entrega: 3 dias corridos (estado em 24/09/2026, dia 3).
 
 | Bloco | Situação |
 |---|---|
@@ -59,9 +60,11 @@ O **WagerFlow** processa operações financeiras de apostas (`BET`, `WIN`, `LOSS
 | Testes de integração contra Postgres real (seção 13 do desafio) | ✅ Concluído |
 | API HTTP (chi) + composição com Uber Fx | ✅ Rotas implementadas; falta cobertura de testes de handler |
 | Autenticação real (Keycloak / OIDC) — **requisito eliminatório** | ✅ Concluído — Keycloak provisionado no compose, isolamento entre provedores e restrição de operações internas |
-| Publicação da outbox + consumidor SQS + inbox | ⏳ Não iniciado |
+| Publicação da outbox (`cmd/outbox-publisher`) | ✅ Concluído, com testes de integração (concorrência, backoff, recuperação de lock) — **não testado ponta a ponta contra SQS real** (ver limitações) |
+| Consumidor SQS (`cmd/wager-consumer`) + inbox | ✅ Concluído (código + testes de integração escritos) — **não executado contra Postgres/SQS reais** (ver limitações) |
 | Worker de referências pendentes | ⏳ Não iniciado |
-| Observabilidade, `Dockerfile`, `docker compose up` completo | ⏳ Não iniciado |
+| `Dockerfile`, `docker compose up` completo | ⏳ Não iniciado |
+| Observabilidade | ⏳ Não iniciada (diferencial declarado como opcional) |
 
 O que ficou de fora e por quê está detalhado, com honestidade, em [`docs/PROJETO.md`](./docs/PROJETO.md#5-limitações-conhecidas-e-trabalho-não-concluído). Checklist por dia em [`docs/PROJETO.md`](./docs/PROJETO.md#6-fluxo-de-desenvolvimento-e-plano-dia-a-dia).
 
@@ -94,13 +97,15 @@ wagerflow-go/
 │   ├── DESAFIO.md        → enunciado original do desafio
 │   └── PROJETO.md        → decisões de arquitetura, com justificativas
 ├── cmd/
-│   ├── api/              → ponto de entrada da API (main.go) — único lugar que conhece o Uber Fx
-│   └── smoketest/        → conferência manual descartável (não faz parte da aplicação final)
+│   ├── api/                 → ponto de entrada da API (main.go) — único lugar que conhece o Uber Fx
+│   ├── outbox-publisher/    → publica outbox_events pendentes no SQS (multi-instância, sem Fx)
+│   ├── wager-consumer/      → consome wager-transactions.fifo, com inbox (multi-instância, sem Fx)
+│   └── smoketest/           → conferência manual descartável (não faz parte da aplicação final)
 ├── internal/
 │   ├── config/           → leitura das variáveis de ambiente
 │   ├── domain/           → entidades e regras de negócio, sem dependência de framework
-│   ├── application/      → casos de uso, orquestração
-│   ├── infrastructure/   → Postgres (hoje); SQS entra na próxima etapa
+│   ├── application/      → casos de uso, orquestração (processamento HTTP e consumo SQS compartilham as mesmas regras)
+│   ├── infrastructure/   → Postgres e SQS (messaging/)
 │   └── interfaces/http/  → router chi, handlers, DTOs, middleware de auth (Keycloak/OIDC) e mapeamento de erros para status HTTP
 ├── migrations/           → migrations versionadas do banco
 ├── test/integration/     → testes contra Postgres real (build tag `integration`)
@@ -219,13 +224,42 @@ Router [chi](https://github.com/go-chi/chi), composição com [Uber Fx](https://
 
 A tabela completa, com os códigos de erro do corpo (`code`), está em `internal/interfaces/http/errors.go` e a justificativa em [`docs/PROJETO.md`](./docs/PROJETO.md#46-api-http).
 
+<a id="mensageria-sqs"></a>
+## 📨 Mensageria (SQS)
+
+Dois binários adicionais, sem Fx (poucas dependências cada, não compensa DI):
+
+- **`cmd/outbox-publisher`** — publica os eventos gravados na outbox (seção 4.4 do `docs/PROJETO.md`) na fila `wagerflow-events.fifo`. Multi-instância via `SELECT ... FOR UPDATE SKIP LOCKED`.
+- **`cmd/wager-consumer`** — consome `wager-transactions.fifo`, o canal de entrada assíncrono de operações (equivalente a `POST /wagering/transactions`, **mesmo caso de uso**: `ProcessWagerCommand`). Corpo esperado da mensagem:
+
+```json
+{
+  "idempotencyKey": "...",
+  "providerId": "provider-a",
+  "externalTransactionId": "...",
+  "playerId": "uuid",
+  "walletId": "uuid",
+  "roundId": "...",
+  "gameId": "...",
+  "kind": "BET",
+  "money": { "amount": "25.00", "currency": "BRL" },
+  "referenceExternalTransactionId": ""
+}
+```
+
+Deduplicação em duas camadas: a tabela `inbox_messages` (por `consumerName` + `messageId` do SQS, gravada na MESMA transação do efeito financeiro) pega reentregas da mesma entrega lógica; a idempotência do domínio (`idempotencyKey`/`externalTransactionId`) pega a mesma operação chegando em mensagens diferentes. Erro de validação/conflito (permanente) manda a mensagem direto para `wager-transactions-dlq.fifo`; erro de infraestrutura (transitório) só não apaga a mensagem — ela volta pela `VisibilityTimeout` e tenta de novo sozinha, com o `maxReceiveCount` da fila como rede de segurança.
+
+Ambos os binários rodam com `go run ./cmd/outbox-publisher` / `go run ./cmd/wager-consumer`, contra o LocalStack do `docker compose` (`SQS_ENDPOINT_URL=http://localhost:4566`). As filas (e a DLQ) são criadas automaticamente no boot — não há passo de provisionamento manual.
+
+<img src="https://capsule-render.vercel.app/api?type=rect&color=0:0d1117,50:1f6feb,100:2ea043&height=4&section=header" width="100%" />
+
 <a id="testes"></a>
 ## 🧪 Testes
 
 O projeto tem duas camadas de teste, com propósitos diferentes:
 
 - **Unitários** (`internal/domain`, `internal/application`): rápidos, sem Docker, usando repositórios em memória (`fakes_test.go`). Cobrem as regras de negócio — máquina de estados, idempotência, `Money`, reversões — mas **não** provam concorrência real nem constraints do banco.
-- **De integração** (`test/integration/`, build tag `integration`): rodam contra um Postgres real, cada teste com um banco isolado (criado e apagado na hora, com as migrations aplicadas do zero). É aqui que a seção 13 do desafio é provada de verdade: as duas apostas de 80.00 sobre saldo de 100.00, a mesma aposta 50× em paralelo, carteiras diferentes em paralelo, duas reversões concorrentes, imutabilidade do ledger (incluindo `TRUNCATE`), idempotência sobrevivendo a um "reinício" do processo, atomicidade com erro/panic, e atomicidade da outbox.
+- **De integração** (`test/integration/`, build tag `integration`): rodam contra um Postgres real, cada teste com um banco isolado (criado e apagado na hora, com as migrations aplicadas do zero). É aqui que a seção 13 do desafio é provada de verdade: as duas apostas de 80.00 sobre saldo de 100.00, a mesma aposta 50× em paralelo, carteiras diferentes em paralelo, duas reversões concorrentes, imutabilidade do ledger (incluindo `TRUNCATE`), idempotência sobrevivendo a um "reinício" do processo, atomicidade com erro/panic, e atomicidade da outbox. `wager_consumer_integration_test.go` cobre o consumidor SQS: mensagem nova, reentrega da mesma mensagem (mesmo `messageId`, não duplica), mesma operação por mensagens diferentes (vira replay), e mensagens concorrentes da mesma operação (só um débito). **Estes testes ainda não foram executados contra um Postgres real nesta máquina** (ver `docs/PROJETO.md`, seção 5) — só compilados com `go vet -tags=integration`.
 
 ```bash
 # Unitários (não precisam de banco)
