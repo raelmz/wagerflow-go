@@ -2,7 +2,9 @@ package http
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -25,6 +27,50 @@ func correlationIDMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Correlation-Id", correlationID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// statusRecorder envolve http.ResponseWriter só para guardar o status
+// HTTP que o handler escreveu — o pacote net/http não expõe isso
+// depois do fato, então é preciso interceptar a chamada a
+// WriteHeader. WriteHeader nunca é chamado quando o handler usa o
+// status implícito 200 (ex.: escreve direto com Write) — por isso o
+// valor inicial já é 200.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (rec *statusRecorder) WriteHeader(status int) {
+	rec.status = status
+	rec.ResponseWriter.WriteHeader(status)
+}
+
+// loggingMiddleware é o log de acesso HTTP pedido na seção 12 do
+// desafio: uma linha JSON por requisição, com método, rota, status,
+// duração e o correlationId (o mesmo que correlationIDMiddleware
+// injeta no context e que os eventos da outbox também carregam — por
+// isso este middleware precisa rodar DEPOIS dele, ver a ordem em
+// router.go). Nunca loga corpo de requisição/resposta: poderia conter
+// dados financeiros ou, na autenticação, nada de sensível deveria
+// vazar mesmo assim, mas a regra do desafio é clara — sem payload
+// completo nos logs.
+func loggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+
+			next.ServeHTTP(rec, r)
+
+			logger.Info("requisição HTTP",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", rec.status,
+				"durationMs", time.Since(start).Milliseconds(),
+				"correlationId", application.CorrelationID(r.Context()),
+			)
+		})
+	}
 }
 
 // writeJSON serializa v como JSON com o status HTTP informado. Usado

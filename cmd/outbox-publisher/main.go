@@ -13,7 +13,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -25,14 +25,18 @@ import (
 	"github.com/raelmz/wagerflow-go/internal/config"
 	"github.com/raelmz/wagerflow-go/internal/infrastructure/messaging"
 	"github.com/raelmz/wagerflow-go/internal/infrastructure/postgres"
+	"github.com/raelmz/wagerflow-go/internal/observability"
 )
 
 func main() {
 	_ = godotenv.Load()
 
+	logger := observability.NewLogger("outbox-publisher")
+
 	cfg, err := config.LoadOutboxPublisherConfig()
 	if err != nil {
-		log.Fatalf("configuração inválida: %v", err)
+		logger.Error("configuração inválida", "error", err.Error())
+		os.Exit(1)
 	}
 
 	// signal.NotifyContext cancela ctx no SIGTERM/SIGINT — é assim que
@@ -43,13 +47,15 @@ func main() {
 
 	pool, err := postgres.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("conectando ao Postgres: %v", err)
+		logger.Error("conectando ao Postgres", "error", err.Error())
+		os.Exit(1)
 	}
 	defer pool.Close()
 
 	publisher, err := messaging.NewSQSEventPublisher(ctx, cfg.SQSEndpointURL, cfg.AWSRegion, cfg.QueueName)
 	if err != nil {
-		log.Fatalf("configurando publisher SQS: %v", err)
+		logger.Error("configurando publisher SQS", "error", err.Error())
+		os.Exit(1)
 	}
 
 	repo := postgres.NewOutboxPublisherRepository(pool)
@@ -70,11 +76,13 @@ func main() {
 		cfg.LockTimeout,
 		application.ExponentialBackoff(60*time.Second),
 	)
+	useCase.SetLogger(logger)
 
-	log.Printf("outbox-publisher iniciado (workerId=%s, fila=%s, poll=%s, lote=%d, lockTimeout=%s)",
-		workerID, cfg.QueueName, cfg.PollInterval, cfg.BatchSize, cfg.LockTimeout)
+	logger.Info("outbox-publisher iniciado",
+		"workerId", workerID, "queue", cfg.QueueName, "pollInterval", cfg.PollInterval,
+		"batchSize", cfg.BatchSize, "lockTimeout", cfg.LockTimeout)
 
 	useCase.Run(ctx, cfg.PollInterval)
 
-	log.Printf("outbox-publisher (workerId=%s) encerrado", workerID)
+	logger.Info("outbox-publisher encerrado", "workerId", workerID)
 }

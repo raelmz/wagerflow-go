@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -30,6 +30,15 @@ type SQSWagerConsumer struct {
 	dlqURL     string
 	useCase    *application.ConsumeWagerTransactionUseCase
 	maxWorkers int
+	logger     *slog.Logger
+}
+
+// SetLogger troca o logger padrão (slog.Default(), texto simples) por
+// um logger estruturado em JSON — normalmente
+// observability.NewLogger("wager-consumer"), montado em
+// cmd/wager-consumer/main.go.
+func (c *SQSWagerConsumer) SetLogger(logger *slog.Logger) {
+	c.logger = logger
 }
 
 // NewSQSWagerConsumer garante que a fila FIFO principal e a DLQ
@@ -93,6 +102,7 @@ func NewSQSWagerConsumer(
 		dlqURL:     *dlqOut.QueueUrl,
 		useCase:    useCase,
 		maxWorkers: 1,
+		logger:     slog.Default(),
 	}, nil
 }
 
@@ -120,7 +130,7 @@ func (c *SQSWagerConsumer) Run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return // cancelado durante o poll: encerra sem logar como erro
 			}
-			log.Printf("wager-consumer: erro no ReceiveMessage: %v", err)
+			c.logger.Error("erro no ReceiveMessage", "error", err.Error())
 			continue
 		}
 
@@ -142,12 +152,14 @@ func (c *SQSWagerConsumer) handle(ctx context.Context, msg types.Message) {
 	case err == nil:
 		c.ack(ctx, msg)
 	case application.IsPermanentWagerError(err):
-		log.Printf("wager-consumer: mensagem %s rejeitada definitivamente (%v) — enviando à DLQ", messageID, err)
+		c.logger.Warn("mensagem rejeitada definitivamente, enviando à DLQ",
+			"messageId", messageID, "error", err.Error())
 		c.deadLetter(ctx, msg)
 	default:
 		// Transitório: NÃO apaga a mensagem. Ela volta a ficar
 		// visível após VisibilityTimeout e é tentada de novo.
-		log.Printf("wager-consumer: erro transitório processando %s, mensagem voltará à fila: %v", messageID, err)
+		c.logger.Warn("erro transitório processando mensagem, ela voltará à fila",
+			"messageId", messageID, "error", err.Error())
 	}
 }
 
@@ -157,7 +169,8 @@ func (c *SQSWagerConsumer) ack(ctx context.Context, msg types.Message) {
 		ReceiptHandle: msg.ReceiptHandle,
 	})
 	if err != nil {
-		log.Printf("wager-consumer: falha ao confirmar (delete) mensagem %s: %v", aws.ToString(msg.MessageId), err)
+		c.logger.Error("falha ao confirmar (delete) mensagem",
+			"messageId", aws.ToString(msg.MessageId), "error", err.Error())
 	}
 }
 
@@ -174,8 +187,8 @@ func (c *SQSWagerConsumer) deadLetter(ctx context.Context, msg types.Message) {
 		MessageDeduplicationId: aws.String(aws.ToString(msg.MessageId)),
 	})
 	if err != nil {
-		log.Printf("wager-consumer: falha ao enviar mensagem %s à DLQ, mantendo na fila principal para retry: %v",
-			aws.ToString(msg.MessageId), err)
+		c.logger.Error("falha ao enviar mensagem à DLQ, mantendo na fila principal para retry",
+			"messageId", aws.ToString(msg.MessageId), "error", err.Error())
 		return
 	}
 	c.ack(ctx, msg)

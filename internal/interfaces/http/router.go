@@ -1,6 +1,8 @@
 package http
 
 import (
+	"log/slog"
+
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 )
@@ -9,7 +11,7 @@ import (
 // handlers já prontos (Uber Fx quem monta cada um, em cmd/api) —
 // este arquivo só liga rota a método de handler e aplica os
 // middlewares de auth por grupo, nada mais.
-func NewRouter(wallets *WalletHandler, wagers *WagerHandler, health *HealthHandler, verifier TokenVerifier) *chi.Mux {
+func NewRouter(wallets *WalletHandler, wagers *WagerHandler, health *HealthHandler, verifier TokenVerifier, logger *slog.Logger) *chi.Mux {
 	r := chi.NewRouter()
 
 	// RequestID/Recoverer são da própria lib chi (chi/middleware):
@@ -17,9 +19,15 @@ func NewRouter(wallets *WalletHandler, wagers *WagerHandler, health *HealthHandl
 	// inteiro (vira 500 em vez de matar o servidor). RequestID dá um
 	// id de requisição para log, independente do nosso
 	// X-Correlation-Id (que é de domínio, não de infraestrutura HTTP).
+	//
+	// Ordem importa: correlationIDMiddleware precisa rodar ANTES de
+	// loggingMiddleware, porque é ele quem coloca o correlationId no
+	// context — loggingMiddleware só consegue ler o que já foi
+	// colocado por um middleware anterior na cadeia.
 	r.Use(chimiddleware.Recoverer)
 	r.Use(chimiddleware.RequestID)
 	r.Use(correlationIDMiddleware)
+	r.Use(loggingMiddleware(logger))
 
 	// Health checks públicos: sem middleware de auth (autenticação
 	// nunca se aplica aqui — o próprio orquestrador/monitoramento os

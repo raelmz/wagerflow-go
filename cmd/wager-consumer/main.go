@@ -6,7 +6,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -16,14 +16,18 @@ import (
 	"github.com/raelmz/wagerflow-go/internal/config"
 	"github.com/raelmz/wagerflow-go/internal/infrastructure/messaging"
 	"github.com/raelmz/wagerflow-go/internal/infrastructure/postgres"
+	"github.com/raelmz/wagerflow-go/internal/observability"
 )
 
 func main() {
 	_ = godotenv.Load()
 
+	logger := observability.NewLogger("wager-consumer")
+
 	cfg, err := config.LoadWagerConsumerConfig()
 	if err != nil {
-		log.Fatalf("configuração inválida: %v", err)
+		logger.Error("configuração inválida", "error", err.Error())
+		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -31,7 +35,8 @@ func main() {
 
 	pool, err := postgres.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("conectando ao Postgres: %v", err)
+		logger.Error("conectando ao Postgres", "error", err.Error())
+		os.Exit(1)
 	}
 	defer pool.Close()
 
@@ -42,10 +47,12 @@ func main() {
 		ctx, cfg.SQSEndpointURL, cfg.AWSRegion, cfg.QueueName, cfg.MaxReceiveCount, useCase,
 	)
 	if err != nil {
-		log.Fatalf("configurando consumidor SQS: %v", err)
+		logger.Error("configurando consumidor SQS", "error", err.Error())
+		os.Exit(1)
 	}
+	consumer.SetLogger(logger)
 
-	log.Printf("wager-consumer iniciado (consumerName=%s, fila=%s)", cfg.ConsumerName, cfg.QueueName)
+	logger.Info("wager-consumer iniciado", "consumerName", cfg.ConsumerName, "queue", cfg.QueueName)
 	consumer.Run(ctx)
-	log.Printf("wager-consumer (consumerName=%s) encerrado", cfg.ConsumerName)
+	logger.Info("wager-consumer encerrado", "consumerName", cfg.ConsumerName)
 }

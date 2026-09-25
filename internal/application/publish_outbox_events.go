@@ -2,7 +2,7 @@ package application
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/raelmz/wagerflow-go/internal/domain"
@@ -45,6 +45,7 @@ type PublishPendingOutboxEventsUseCase struct {
 	batchSize   int
 	lockTimeout time.Duration
 	backoff     BackoffFunc
+	logger      *slog.Logger
 }
 
 func NewPublishPendingOutboxEventsUseCase(
@@ -62,7 +63,23 @@ func NewPublishPendingOutboxEventsUseCase(
 		batchSize:   batchSize,
 		lockTimeout: lockTimeout,
 		backoff:     backoff,
+		// slog.Default() garante que o campo nunca fica nil — quem
+		// quiser logs em JSON com o campo "service" chama SetLogger
+		// depois (ver cmd/outbox-publisher/main.go); os testes deste
+		// pacote não chamam, e continuam funcionando do mesmo jeito.
+		logger: slog.Default(),
 	}
+}
+
+// SetLogger troca o logger padrão (slog.Default(), texto simples) por
+// um logger estruturado em JSON — normalmente
+// observability.NewLogger("outbox-publisher"), montado em
+// cmd/outbox-publisher/main.go. Existir como método separado, em vez
+// de mais um parâmetro no construtor, evita alterar a assinatura de
+// NewPublishPendingOutboxEventsUseCase (e, com isso, os testes que já
+// existiam para este caso de uso).
+func (uc *PublishPendingOutboxEventsUseCase) SetLogger(logger *slog.Logger) {
+	uc.logger = logger
 }
 
 // RunOnce reivindica e tenta publicar UM lote. Devolve quantos eventos
@@ -88,10 +105,12 @@ func (uc *PublishPendingOutboxEventsUseCase) RunOnce(ctx context.Context) (int, 
 			attempts := event.Attempts + 1
 			delay := uc.backoff(attempts)
 			if markErr := uc.repo.MarkFailed(ctx, event.ID, uc.workerID, time.Now().Add(delay)); markErr != nil {
-				log.Printf("outbox-publisher: evento %s falhou ao publicar E falhou ao registrar a tentativa (próxima tentativa pode demorar mais que o esperado): publicação=%v, registro=%v", event.ID, err, markErr)
+				uc.logger.Error("evento falhou ao publicar E falhou ao registrar a tentativa (próxima tentativa pode demorar mais que o esperado)",
+					"eventId", event.ID, "workerId", uc.workerID, "publishError", err, "markError", markErr)
 				continue
 			}
-			log.Printf("outbox-publisher: falha ao publicar evento %s (tentativa %d, próxima em %s): %v", event.ID, attempts, delay, err)
+			uc.logger.Warn("falha ao publicar evento, nova tentativa agendada",
+				"eventId", event.ID, "workerId", uc.workerID, "attempts", attempts, "nextAttemptIn", delay, "error", err.Error())
 			continue
 		}
 
@@ -105,7 +124,8 @@ func (uc *PublishPendingOutboxEventsUseCase) RunOnce(ctx context.Context) (int, 
 			// consumidor correto também deve ser idempotente por
 			// eventId (mesma garantia que a inbox dá do lado de
 			// entrada).
-			log.Printf("outbox-publisher: evento %s publicado com sucesso, mas falhou ao marcar published_at: %v", event.ID, err)
+			uc.logger.Error("evento publicado com sucesso, mas falhou ao marcar published_at",
+				"eventId", event.ID, "workerId", uc.workerID, "error", err.Error())
 		}
 	}
 
@@ -129,7 +149,7 @@ func (uc *PublishPendingOutboxEventsUseCase) Run(ctx context.Context, pollInterv
 			return
 		case <-ticker.C:
 			if _, err := uc.RunOnce(ctx); err != nil {
-				log.Printf("outbox-publisher: falha ao reivindicar lote da outbox: %v", err)
+				uc.logger.Error("falha ao reivindicar lote da outbox", "workerId", uc.workerID, "error", err.Error())
 			}
 		}
 	}

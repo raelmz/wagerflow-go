@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	stdhttp "net/http"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/raelmz/wagerflow-go/internal/domain"
 	"github.com/raelmz/wagerflow-go/internal/infrastructure/postgres"
 	wfhttp "github.com/raelmz/wagerflow-go/internal/interfaces/http"
+	"github.com/raelmz/wagerflow-go/internal/observability"
 )
 
 func main() {
@@ -29,6 +31,7 @@ func main() {
 
 	fx.New(
 		fx.Provide(
+			newLogger,
 			config.Load,
 			newPool,
 			newTxRunner,
@@ -51,6 +54,15 @@ func main() {
 		),
 		fx.Invoke(registerHTTPServer),
 	).Run()
+}
+
+// newLogger monta o logger estruturado em JSON usado por toda a API
+// (seção 12 do desafio). Fica disponível para qualquer componente que
+// o Fx monta depois — hoje, o router (log de acesso HTTP); no futuro,
+// qualquer handler ou caso de uso que precise logar algo pode receber
+// *slog.Logger no construtor do mesmo jeito.
+func newLogger() *slog.Logger {
+	return observability.NewLogger("api")
 }
 
 // newPool cria o pool do Postgres e registra no ciclo de vida do Fx

@@ -2,7 +2,7 @@ package application
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/raelmz/wagerflow-go/internal/domain"
@@ -28,6 +28,7 @@ type RetryPendingReferenceUseCase struct {
 	backoff     BackoffFunc
 	maxAttempts int
 	ttl         time.Duration
+	logger      *slog.Logger
 }
 
 func NewRetryPendingReferenceUseCase(
@@ -49,7 +50,19 @@ func NewRetryPendingReferenceUseCase(
 		backoff:     backoff,
 		maxAttempts: maxAttempts,
 		ttl:         ttl,
+		// Mesmo raciocínio de PublishPendingOutboxEventsUseCase:
+		// default seguro (slog.Default()), trocado por um logger JSON
+		// via SetLogger em cmd/pending-reference-worker/main.go, sem
+		// mudar a assinatura do construtor.
+		logger: slog.Default(),
 	}
+}
+
+// SetLogger troca o logger padrão por um logger estruturado em JSON.
+// Ver o comentário equivalente em
+// PublishPendingOutboxEventsUseCase.SetLogger.
+func (uc *RetryPendingReferenceUseCase) SetLogger(logger *slog.Logger) {
+	uc.logger = logger
 }
 
 // RunOnce reivindica e processa UM lote. Devolve quantas transações
@@ -100,7 +113,8 @@ func (uc *RetryPendingReferenceUseCase) processOne(ctx context.Context, candidat
 		return nil
 	})
 	if err != nil {
-		log.Printf("pending-reference-worker: falha ao reaplicar transação %s (será tentada de novo após lockTimeout): %v", candidate.ID, err)
+		uc.logger.Error("falha ao reaplicar transação pendente de referência (será tentada de novo após lockTimeout)",
+			"transactionId", candidate.ID, "workerId", uc.workerID, "error", err.Error())
 		return
 	}
 
@@ -109,7 +123,8 @@ func (uc *RetryPendingReferenceUseCase) processOne(ctx context.Context, candidat
 		// porque a referência finalmente apareceu): não há mais nada
 		// a agendar, só liberar o lock.
 		if err := uc.repo.ReleaseLock(ctx, candidate.ID, uc.workerID); err != nil {
-			log.Printf("pending-reference-worker: falha ao liberar lock da transação %s: %v", candidate.ID, err)
+			uc.logger.Error("falha ao liberar lock da transação",
+				"transactionId", candidate.ID, "workerId", uc.workerID, "error", err.Error())
 		}
 		return
 	}
@@ -118,7 +133,8 @@ func (uc *RetryPendingReferenceUseCase) processOne(ctx context.Context, candidat
 	attempts := candidate.Attempts + 1
 	delay := uc.backoff(attempts)
 	if err := uc.repo.MarkRetryScheduled(ctx, candidate.ID, uc.workerID, attempts, time.Now().Add(delay)); err != nil {
-		log.Printf("pending-reference-worker: falha ao agendar nova tentativa da transação %s (próxima tentativa pode demorar mais que o esperado): %v", candidate.ID, err)
+		uc.logger.Error("falha ao agendar nova tentativa da transação (próxima tentativa pode demorar mais que o esperado)",
+			"transactionId", candidate.ID, "workerId", uc.workerID, "error", err.Error())
 	}
 }
 
@@ -136,7 +152,7 @@ func (uc *RetryPendingReferenceUseCase) Run(ctx context.Context, pollInterval ti
 			return
 		case <-ticker.C:
 			if _, err := uc.RunOnce(ctx); err != nil {
-				log.Printf("pending-reference-worker: falha ao reivindicar lote de referências pendentes: %v", err)
+				uc.logger.Error("falha ao reivindicar lote de referências pendentes", "workerId", uc.workerID, "error", err.Error())
 			}
 		}
 	}

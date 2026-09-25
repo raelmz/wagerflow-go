@@ -40,6 +40,20 @@ func correlationIDFor(ctx context.Context, txn *domain.WagerTransaction) string 
 	return txn.ID().String()
 }
 
+// CorrelationID devolve o correlationId gravado no context por
+// WithCorrelationID, ou "" se nenhum foi definido. Exportada (ao
+// contrário de correlationIDFor) para uso fora deste pacote — hoje
+// pelo middleware de log de acesso HTTP (internal/interfaces/http),
+// que precisa do mesmo id usado nos eventos da outbox para uma
+// requisição e os eventos que ela gera aparecerem correlacionados nos
+// logs.
+func CorrelationID(ctx context.Context) string {
+	if id, ok := ctx.Value(correlationIDKey{}).(string); ok {
+		return id
+	}
+	return ""
+}
+
 // emitProcessed grava WagerTransactionProcessed e devolve o eventId,
 // para o WalletBalanceChanged apontar para ele como causationId.
 func emitProcessed(ctx context.Context, uow domain.UnitOfWork, txn *domain.WagerTransaction) (uuid.UUID, error) {

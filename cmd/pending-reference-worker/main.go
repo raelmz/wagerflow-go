@@ -11,7 +11,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -22,14 +22,18 @@ import (
 	"github.com/raelmz/wagerflow-go/internal/application"
 	"github.com/raelmz/wagerflow-go/internal/config"
 	"github.com/raelmz/wagerflow-go/internal/infrastructure/postgres"
+	"github.com/raelmz/wagerflow-go/internal/observability"
 )
 
 func main() {
 	_ = godotenv.Load()
 
+	logger := observability.NewLogger("pending-reference-worker")
+
 	cfg, err := config.LoadPendingReferenceWorkerConfig()
 	if err != nil {
-		log.Fatalf("configuração inválida: %v", err)
+		logger.Error("configuração inválida", "error", err.Error())
+		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -37,7 +41,8 @@ func main() {
 
 	pool, err := postgres.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("conectando ao Postgres: %v", err)
+		logger.Error("conectando ao Postgres", "error", err.Error())
+		os.Exit(1)
 	}
 	defer pool.Close()
 
@@ -59,11 +64,13 @@ func main() {
 		cfg.MaxAttempts,
 		cfg.TTL,
 	)
+	useCase.SetLogger(logger)
 
-	log.Printf("pending-reference-worker iniciado (workerId=%s, poll=%s, lote=%d, lockTimeout=%s, maxAttempts=%d, ttl=%s)",
-		workerID, cfg.PollInterval, cfg.BatchSize, cfg.LockTimeout, cfg.MaxAttempts, cfg.TTL)
+	logger.Info("pending-reference-worker iniciado",
+		"workerId", workerID, "pollInterval", cfg.PollInterval, "batchSize", cfg.BatchSize,
+		"lockTimeout", cfg.LockTimeout, "maxAttempts", cfg.MaxAttempts, "ttl", cfg.TTL)
 
 	useCase.Run(ctx, cfg.PollInterval)
 
-	log.Printf("pending-reference-worker (workerId=%s) encerrado", workerID)
+	logger.Info("pending-reference-worker encerrado", "workerId", workerID)
 }
