@@ -49,7 +49,7 @@ O **WagerFlow** processa operações financeiras de apostas (`BET`, `WIN`, `LOSS
 <a id="status"></a>
 ## 🚀 Status
 
-**Em desenvolvimento** — prazo de entrega: 3 dias corridos (estado em 24/09/2026, dia 3).
+**Todos os critérios eliminatórios e a entrega básica (`docker compose up --build`) estão concluídos e validados** — o que resta é ampliar cobertura de teste e observabilidade (nota extra, sem bloqueador de prazo).
 
 | Bloco | Situação |
 |---|---|
@@ -60,11 +60,11 @@ O **WagerFlow** processa operações financeiras de apostas (`BET`, `WIN`, `LOSS
 | Testes de integração contra Postgres real (seção 13 do desafio) | ✅ Concluído |
 | API HTTP (chi) + composição com Uber Fx | ✅ Rotas implementadas; falta cobertura de testes de handler |
 | Autenticação real (Keycloak / OIDC) — **requisito eliminatório** | ✅ Concluído — Keycloak provisionado no compose, isolamento entre provedores e restrição de operações internas |
-| Publicação da outbox (`cmd/outbox-publisher`) | ✅ Concluído, com testes de integração (concorrência, backoff, recuperação de lock) — **não testado ponta a ponta contra SQS real** (ver limitações) |
-| Consumidor SQS (`cmd/wager-consumer`) + inbox | ✅ Concluído (código + testes de integração escritos) — **não executado contra Postgres/SQS reais** (ver limitações) |
-| Worker de referências pendentes (`cmd/pending-reference-worker`) | ✅ Concluído, com testes unitários (fakes) — **ainda não testado contra Postgres real** (ver limitações) |
-| `Dockerfile`, `docker compose up` completo | ⏳ Não iniciado |
-| Observabilidade | ⏳ Não iniciada (diferencial declarado como opcional) |
+| Publicação da outbox (`cmd/outbox-publisher`) | ✅ Concluído — testes de integração (concorrência, backoff, recuperação de lock) e validação manual ponta a ponta contra Postgres/SQS reais |
+| Consumidor SQS (`cmd/wager-consumer`) + inbox | ✅ Concluído — testes de integração e validação manual ponta a ponta contra Postgres/SQS reais |
+| Worker de referências pendentes (`cmd/pending-reference-worker`) | ✅ Concluído, com testes unitários (fakes) — **ainda não executado contra Postgres real** (sem teste de integração automatizado; ver limitações) |
+| `Dockerfile`, `docker compose up --build` completo | ✅ Concluído, validado de ponta a ponta |
+| Observabilidade (logs JSON + `/health/ready` completo) | ✅ Logs estruturados (`log/slog`) e `/health/ready` cobrindo Postgres+SQS+Keycloak concluídos e validados — **métricas ainda pendentes** (ver limitações) |
 
 O que ficou de fora e por quê está detalhado, com honestidade, em [`docs/PROJETO.md`](./docs/PROJETO.md#5-limitações-conhecidas-e-trabalho-não-concluído). Checklist por dia em [`docs/PROJETO.md`](./docs/PROJETO.md#6-fluxo-de-desenvolvimento-e-plano-dia-a-dia).
 
@@ -140,7 +140,10 @@ Primeira vez demora mais (build das imagens Go + download de Postgres/Keycloak/L
 
 ```bash
 curl http://localhost:8080/health/live
+curl http://localhost:8080/health/ready
 ```
+
+`ready` confere Postgres, SQS e Keycloak e retorna todas as falhas de uma vez, não só a primeira. Os 4 binários (`api`, `outbox-publisher`, `wager-consumer`, `pending-reference-worker`) emitem logs estruturados em JSON no `stdout` (via `log/slog`), com `correlationId` reaproveitado dos eventos de negócio — inclusive um log por requisição HTTP.
 
 > As filas SQS (`wagerflow-events.fifo`, `wager-transactions.fifo`) não são criadas pelo compose: o próprio `outbox-publisher`/`wager-consumer` as cria (via `CreateQueue`, idempotente) na primeira vez que rodam contra o LocalStack.
 
@@ -211,7 +214,7 @@ Router [chi](https://github.com/go-chi/chi), composição com [Uber Fx](https://
 | `POST /wagering/transactions` | Processa `BET`/`WIN`/`LOSS`/`REFUND`/`ROLLBACK`. Header `Idempotency-Key` **obrigatório** |
 | `GET /wagering/transactions/{transactionId}` | Consulta transação pelo id interno |
 | `GET /providers/{providerId}/wagering/transactions/{externalTransactionId}` | Consulta por provedor + id externo |
-| `GET /health/live` · `GET /health/ready` | Liveness (processo) e readiness (Postgres) |
+| `GET /health/live` · `GET /health/ready` | Liveness (processo) e readiness (Postgres + SQS + Keycloak) |
 
 **Status HTTP** (o contrato distingue cada situação, como pede a seção 9 do desafio):
 
@@ -273,7 +276,7 @@ Ver detalhes de design em [`docs/PROJETO.md` seção 5.2](./docs/PROJETO.md#52-w
 O projeto tem duas camadas de teste, com propósitos diferentes:
 
 - **Unitários** (`internal/domain`, `internal/application`): rápidos, sem Docker, usando repositórios em memória (`fakes_test.go`). Cobrem as regras de negócio — máquina de estados, idempotência, `Money`, reversões — mas **não** provam concorrência real nem constraints do banco.
-- **De integração** (`test/integration/`, build tag `integration`): rodam contra um Postgres real, cada teste com um banco isolado (criado e apagado na hora, com as migrations aplicadas do zero). É aqui que a seção 13 do desafio é provada de verdade: as duas apostas de 80.00 sobre saldo de 100.00, a mesma aposta 50× em paralelo, carteiras diferentes em paralelo, duas reversões concorrentes, imutabilidade do ledger (incluindo `TRUNCATE`), idempotência sobrevivendo a um "reinício" do processo, atomicidade com erro/panic, e atomicidade da outbox. `wager_consumer_integration_test.go` cobre o consumidor SQS: mensagem nova, reentrega da mesma mensagem (mesmo `messageId`, não duplica), mesma operação por mensagens diferentes (vira replay), e mensagens concorrentes da mesma operação (só um débito). **Estes testes ainda não foram executados contra um Postgres real nesta máquina** (ver `docs/PROJETO.md`, seção 5) — só compilados com `go vet -tags=integration`.
+- **De integração** (`test/integration/`, build tag `integration`): rodam contra um Postgres real, cada teste com um banco isolado (criado e apagado na hora, com as migrations aplicadas do zero). É aqui que a seção 13 do desafio é provada de verdade: as duas apostas de 80.00 sobre saldo de 100.00, a mesma aposta 50× em paralelo, carteiras diferentes em paralelo, duas reversões concorrentes, imutabilidade do ledger (incluindo `TRUNCATE`), idempotência sobrevivendo a um "reinício" do processo, atomicidade com erro/panic, e atomicidade da outbox. `wager_consumer_integration_test.go` cobre o consumidor SQS: mensagem nova, reentrega da mesma mensagem (mesmo `messageId`, não duplica), mesma operação por mensagens diferentes (vira replay), e mensagens concorrentes da mesma operação (só um débito). **Executados e confirmados `ok`** contra Postgres real via Docker (ver comandos abaixo); o worker de referências pendentes (`cmd/pending-reference-worker`) é a única exceção — só tem testes unitários com fakes, ainda sem teste de integração automatizado (ver `docs/PROJETO.md`, seção 5.2).
 
 ```bash
 # Unitários (não precisam de banco)
