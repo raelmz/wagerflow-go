@@ -62,7 +62,7 @@ O **WagerFlow** processa operações financeiras de apostas (`BET`, `WIN`, `LOSS
 | Autenticação real (Keycloak / OIDC) — **requisito eliminatório** | ✅ Concluído — Keycloak provisionado no compose, isolamento entre provedores e restrição de operações internas |
 | Publicação da outbox (`cmd/outbox-publisher`) | ✅ Concluído, com testes de integração (concorrência, backoff, recuperação de lock) — **não testado ponta a ponta contra SQS real** (ver limitações) |
 | Consumidor SQS (`cmd/wager-consumer`) + inbox | ✅ Concluído (código + testes de integração escritos) — **não executado contra Postgres/SQS reais** (ver limitações) |
-| Worker de referências pendentes | ⏳ Não iniciado |
+| Worker de referências pendentes (`cmd/pending-reference-worker`) | ✅ Concluído, com testes unitários (fakes) — **ainda não testado contra Postgres real** (ver limitações) |
 | `Dockerfile`, `docker compose up` completo | ⏳ Não iniciado |
 | Observabilidade | ⏳ Não iniciada (diferencial declarado como opcional) |
 
@@ -100,6 +100,7 @@ wagerflow-go/
 │   ├── api/                 → ponto de entrada da API (main.go) — único lugar que conhece o Uber Fx
 │   ├── outbox-publisher/    → publica outbox_events pendentes no SQS (multi-instância, sem Fx)
 │   ├── wager-consumer/      → consome wager-transactions.fifo, com inbox (multi-instância, sem Fx)
+│   ├── pending-reference-worker/ → reaplica WagerTransaction em PENDING_REFERENCE (backoff, TTL, multi-instância, sem Fx)
 │   └── smoketest/           → conferência manual descartável (não faz parte da aplicação final)
 ├── internal/
 │   ├── config/           → leitura das variáveis de ambiente
@@ -250,6 +251,16 @@ Dois binários adicionais, sem Fx (poucas dependências cada, não compensa DI):
 Deduplicação em duas camadas: a tabela `inbox_messages` (por `consumerName` + `messageId` do SQS, gravada na MESMA transação do efeito financeiro) pega reentregas da mesma entrega lógica; a idempotência do domínio (`idempotencyKey`/`externalTransactionId`) pega a mesma operação chegando em mensagens diferentes. Erro de validação/conflito (permanente) manda a mensagem direto para `wager-transactions-dlq.fifo`; erro de infraestrutura (transitório) só não apaga a mensagem — ela volta pela `VisibilityTimeout` e tenta de novo sozinha, com o `maxReceiveCount` da fila como rede de segurança.
 
 Ambos os binários rodam com `go run ./cmd/outbox-publisher` / `go run ./cmd/wager-consumer`, contra o LocalStack do `docker compose` (`SQS_ENDPOINT_URL=http://localhost:4566`). As filas (e a DLQ) são criadas automaticamente no boot — não há passo de provisionamento manual.
+
+### 🔁 Worker de referências pendentes
+
+`cmd/pending-reference-worker` reivindica `WagerTransaction` em `PENDING_REFERENCE` (REFUND/ROLLBACK/WIN que chegaram antes da operação que referenciam — seção 7 do desafio) e as reaplica, reaproveitando a MESMA regra de negócio do processamento HTTP/SQS. Cada transação tem **5 tentativas OU 5 minutos** (o que vier primeiro) desde que entrou em `PENDING_REFERENCE`; esgotado o limite, é rejeitada definitivamente com `failureCode = REFERENCE_NOT_FOUND`. Suporta múltiplas instâncias (mesmo mecanismo de lock com `SELECT ... FOR UPDATE SKIP LOCKED` do `outbox-publisher`). Roda com:
+
+```
+go run ./cmd/pending-reference-worker
+```
+
+Ver detalhes de design em [`docs/PROJETO.md` seção 5.2](./docs/PROJETO.md#52-worker-de-referências-pendentes-implementado-em-25092026).
 
 <img src="https://capsule-render.vercel.app/api?type=rect&color=0:0d1117,50:1f6feb,100:2ea043&height=4&section=header" width="100%" />
 
