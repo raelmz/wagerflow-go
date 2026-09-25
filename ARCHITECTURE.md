@@ -35,6 +35,7 @@ internal/
   application/      # Casos de uso, UnitOfWork/TxRunner (interfaces), payload hash, backoff
   infrastructure/    # postgres (pgx/v5), messaging (SQS/LocalStack)
   interfaces/http/   # chi, handlers, middleware de auth, mapeamento de erro → status HTTP
+  bootstrap/         # composição do Uber Fx da API (único lugar que conhece o Fx)
 ```
 
 `domain` e `application` nunca importam `infrastructure` diretamente — só
@@ -176,6 +177,17 @@ container de DI valer a pena. Os outros 3 binários (`outbox-publisher`,
 cada um e montam o grafo manualmente em `main.go` — Fx ali seria
 complexidade sem ganho real.
 
+A composição em si (a lista de `fx.Provide`/`fx.Invoke`) mora em
+`internal/bootstrap/api_module.go`, exportada como `bootstrap.Module`,
+e não em `cmd/api/main.go` — que fica só com `fx.New(bootstrap.Module).Run()`.
+A razão é puramente técnica: um pacote `main` não pode ser importado
+por nenhum outro pacote em Go, nem por um teste, e a seção 13 do
+desafio exige um teste que monte essa composição e verifique
+`Start`/`Stop`. `test/integration/fx_lifecycle_integration_test.go`
+monta o MESMO `bootstrap.Module` de produção, confirma que o `Start`
+sobe o servidor de verdade e que o `Stop` libera os recursos (pool do
+Postgres fechado, servidor HTTP não aceita mais conexão).
+
 ## 12. Shutdown
 
 Todos os binários fora do Fx usam `signal.NotifyContext` (SIGTERM/SIGINT)
@@ -202,35 +214,43 @@ execução contra o LocalStack.
 
 ## 14. Limitações conhecidas, interpretações e trabalho não concluído
 
-Lista condensada — detalhe completo, com justificativa de cada item, em
-`docs/PROJETO.md`, seção 5:
+Estado em 25/09/2026, na reta final antes da entrega. Lista condensada —
+detalhe completo, com justificativa de cada item, em `docs/PROJETO.md`,
+seção 5:
 
 - **Sem garantia de ordem por agregado sob falha na publicação da
   outbox**: um evento mais recente do mesmo `aggregateId` pode ser
-  publicado antes de um evento anterior que está em backoff. Avaliado
-  contra a seção 11 do desafio (não exige ordem garantida); decisão
-  consciente de não corrigir agora, dado o prazo — melhoria futura seria
-  usar `MessageGroupId = aggregateId` na fila FIFO de saída.
+  publicado antes de um evento anterior que está em backoff — o
+  `MessageGroupId = aggregateId` já usado no envio (`sqs_event_publisher.go`)
+  só ordena o que já foi enviado, não evita que o `Claim` selecione o
+  evento novo primeiro. Avaliado contra a seção 11 do desafio (não
+  exige ordem garantida); decisão consciente de não corrigir, dado o
+  prazo — melhoria futura seria o `Claim` respeitar a ordem de
+  ocorrência por agregado.
 - **Worker de referências pendentes** validado só por testes unitários
   com fakes em memória; ainda não executado contra Postgres real (nem
-  teste de integração, nem execução manual).
-- **`docker compose up --build` completo** foi escrito nesta sessão mas
-  ainda não foi executado de ponta a ponta pelo desenvolvedor (só
-  validado sintaticamente).
-- **Sem testes automatizados de handler HTTP** (wallet/wager) — cobertos
-  hoje só manualmente (`curl`) e indiretamente pelos testes de
-  `application`/domínio.
-- **Sem teste de integração automatizado contra o Keycloak real** — fluxo
-  OIDC completo confirmado manualmente com `curl` contra os containers
-  reais, não em `go test`.
-- **Sem observabilidade** (logs estruturados em JSON, métricas).
-  `GET /health/ready` verifica só o Postgres.
+  teste de integração, nem execução manual) — única exceção entre os 4
+  binários, que têm validação ponta a ponta contra infraestrutura real.
+- **Sem métricas** (contadores por status, duplicatas, retries, DLQ,
+  atraso da outbox, latência, divergências de reconciliação — seção 12
+  do desafio). Tracing com OpenTelemetry e dashboards seguem como
+  diferencial opcional, não feitos.
 - **Sem testes formais de recuperação de falha e multi-instância**
   (≥ 3 processos) além do que os testes de integração já exercitam
   indiretamente via `SKIP LOCKED`.
 - O teste de integração "negativo" da seção 13 (remover de propósito o
   `FOR UPDATE`/a condição de saldo e confirmar que o teste correspondente
   falha) foi feito manualmente, não está automatizado.
+
+**Já resolvido e validado** (registrado aqui porque versões anteriores
+deste documento ainda listavam estes itens como pendentes):
+`docker compose up --build` completo, testes automatizados de handler
+HTTP (`wallet_handler_test.go`/`wager_handler_test.go`/`errors_test.go`),
+teste de integração automatizado contra o Keycloak real
+(`keycloak_auth_integration_test.go`), observabilidade básica (logs
+estruturados em JSON + `GET /health/ready` cobrindo Postgres, SQS e
+Keycloak) e a verificação da composição Fx/ciclo de vida exigida pela
+seção 13 (`fx_lifecycle_integration_test.go`, seção 11 acima).
 
 ## 15. Como reproduzir a solução do zero
 

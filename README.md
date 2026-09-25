@@ -8,7 +8,7 @@
 
 <br />
 
-[![Status](https://img.shields.io/badge/Status-Em_desenvolvimento-1f6feb?style=for-the-badge&labelColor=0d1117)](#status)
+[![Status](https://img.shields.io/badge/Status-Pronto_para_entrega-2ea043?style=for-the-badge&labelColor=0d1117)](#status)
 [![Go](https://img.shields.io/badge/Go-1.27-00ADD8?style=for-the-badge&labelColor=0d1117&logo=go&logoColor=00ADD8)](#stack)
 [![Processo](https://img.shields.io/badge/Jungle_Gaming-Backend_Jr-2ea043?style=for-the-badge&labelColor=0d1117)](#sobre)
 
@@ -49,7 +49,7 @@ O **WagerFlow** processa operações financeiras de apostas (`BET`, `WIN`, `LOSS
 <a id="status"></a>
 ## 🚀 Status
 
-**Todos os critérios eliminatórios e a entrega básica (`docker compose up --build`) estão concluídos e validados** — o que resta é ampliar cobertura de teste e observabilidade (nota extra, sem bloqueador de prazo).
+**Todos os critérios eliminatórios e a entrega básica (`docker compose up --build`) estão concluídos e validados**, assim como testes de handler HTTP, teste de integração automatizado contra o Keycloak real e observabilidade básica (logs + health checks). O que resta é só nota extra sem bloqueador de prazo (métricas, testes de recuperação multi-instância) — detalhado com transparência nas limitações conhecidas abaixo.
 
 | Bloco | Situação |
 |---|---|
@@ -58,13 +58,14 @@ O **WagerFlow** processa operações financeiras de apostas (`BET`, `WIN`, `LOSS
 | Processamento de `BET`/`WIN`/`LOSS`/`REFUND`/`ROLLBACK` com idempotência persistente | ✅ Concluído |
 | Outbox transacional (**escrita** dos eventos na mesma transação) | ✅ Concluído |
 | Testes de integração contra Postgres real (seção 13 do desafio) | ✅ Concluído |
-| API HTTP (chi) + composição com Uber Fx | ✅ Rotas implementadas; falta cobertura de testes de handler |
+| API HTTP (chi) + composição com Uber Fx, com testes automatizados de handler | ✅ Concluído |
 | Autenticação real (Keycloak / OIDC) — **requisito eliminatório** | ✅ Concluído — Keycloak provisionado no compose, isolamento entre provedores e restrição de operações internas |
 | Publicação da outbox (`cmd/outbox-publisher`) | ✅ Concluído — testes de integração (concorrência, backoff, recuperação de lock) e validação manual ponta a ponta contra Postgres/SQS reais |
 | Consumidor SQS (`cmd/wager-consumer`) + inbox | ✅ Concluído — testes de integração e validação manual ponta a ponta contra Postgres/SQS reais |
 | Worker de referências pendentes (`cmd/pending-reference-worker`) | ✅ Concluído, com testes unitários (fakes) — **ainda não executado contra Postgres real** (sem teste de integração automatizado; ver limitações) |
 | `Dockerfile`, `docker compose up --build` completo | ✅ Concluído, validado de ponta a ponta |
 | Observabilidade (logs JSON + `/health/ready` completo) | ✅ Logs estruturados (`log/slog`) e `/health/ready` cobrindo Postgres+SQS+Keycloak concluídos e validados — **métricas ainda pendentes** (ver limitações) |
+| Verificação da composição Fx e do ciclo de vida (`Start`/`Stop`, seção 13 do desafio) | ✅ Concluído — `test/integration/fx_lifecycle_integration_test.go` monta o `fx.App` real da API e confirma a liberação de recursos no `Stop` |
 
 O que ficou de fora e por quê está detalhado, com honestidade, em [`docs/PROJETO.md`](./docs/PROJETO.md#5-limitações-conhecidas-e-trabalho-não-concluído). Checklist por dia em [`docs/PROJETO.md`](./docs/PROJETO.md#6-fluxo-de-desenvolvimento-e-plano-dia-a-dia).
 
@@ -97,12 +98,13 @@ wagerflow-go/
 │   ├── DESAFIO.md        → enunciado original do desafio
 │   └── PROJETO.md        → decisões de arquitetura, com justificativas
 ├── cmd/
-│   ├── api/                 → ponto de entrada da API (main.go) — único lugar que conhece o Uber Fx
+│   ├── api/                 → ponto de entrada da API (main.go), chama internal/bootstrap
 │   ├── outbox-publisher/    → publica outbox_events pendentes no SQS (multi-instância, sem Fx)
 │   ├── wager-consumer/      → consome wager-transactions.fifo, com inbox (multi-instância, sem Fx)
 │   ├── pending-reference-worker/ → reaplica WagerTransaction em PENDING_REFERENCE (backoff, TTL, multi-instância, sem Fx)
 │   └── smoketest/           → conferência manual descartável (não faz parte da aplicação final)
 ├── internal/
+│   ├── bootstrap/        → composição do Uber Fx da API (único lugar que conhece o Fx)
 │   ├── config/           → leitura das variáveis de ambiente
 │   ├── domain/           → entidades e regras de negócio, sem dependência de framework
 │   ├── application/      → casos de uso, orquestração (processamento HTTP e consumo SQS compartilham as mesmas regras)
@@ -322,9 +324,25 @@ MSYS_NO_PATHCONV=1 docker run --rm --network deployments_default \
   -e TEST_KEYCLOAK_ISSUER_URL="http://wagerflow-keycloak:8080/realms/wagerflow" \
   -v "$(pwd -W):/app" -w /app golang:1.27 \
   go test -tags=integration ./test/integration/... -run TestKeycloakAuth
+
+# Teste da composição do Fx e do ciclo de vida da API (seção 13 do
+# desafio: mesma build tag "integration"; precisa de Postgres,
+# Keycloak E LocalStack do docker compose de pé, já que monta o
+# fx.App REAL de cmd/api). Sobe o servidor numa porta separada
+# (8090) de propósito, para não conflitar com o container
+# wagerflow-api caso ele esteja no ar:
+go test -tags=integration ./test/integration/... -run TestFxAppLifecycle
+
+# No Windows (Git Bash), pelo container, na mesma rede do compose:
+MSYS_NO_PATHCONV=1 docker run --rm --network deployments_default \
+  -e DATABASE_URL="postgres://wagerflow:wagerflow@wagerflow-postgres:5432/wagerflow?sslmode=disable" \
+  -e KEYCLOAK_ISSUER_URL="http://wagerflow-keycloak:8080/realms/wagerflow" \
+  -e SQS_ENDPOINT_URL="http://wagerflow-localstack:4566" \
+  -v "$(pwd -W):/app" -w /app golang:1.27 \
+  go test -tags=integration ./test/integration/... -run TestFxAppLifecycle
 ```
 
-A camada HTTP (`internal/interfaces/http`) tem testes automatizados de handler desde a sessão 017 (`wallet_handler_test.go`/`wager_handler_test.go`/`errors_test.go`, com repositórios em memória). O middleware de autenticação/autorização tem dois níveis de teste: `auth_middleware_test.go` cobre a lógica de decisão com um `TokenVerifier` fake (rápido, sem Docker), e `test/integration/keycloak_auth_integration_test.go` (build tag `integration`) automatiza o fluxo OIDC completo contra um Keycloak real — os 5 cenários que antes só eram validados manualmente com `curl` (sem token, token inválido, token de cada provedor com sua própria identidade, isolamento entre `provider` e `internal`).
+A camada HTTP (`internal/interfaces/http`) tem testes automatizados de handler desde a sessão 017 (`wallet_handler_test.go`/`wager_handler_test.go`/`errors_test.go`, com repositórios em memória). O middleware de autenticação/autorização tem dois níveis de teste: `auth_middleware_test.go` cobre a lógica de decisão com um `TokenVerifier` fake (rápido, sem Docker), e `test/integration/keycloak_auth_integration_test.go` (build tag `integration`) automatiza o fluxo OIDC completo contra um Keycloak real — os 5 cenários que antes só eram validados manualmente com `curl` (sem token, token inválido, token de cada provedor com sua própria identidade, isolamento entre `provider` e `internal`). A composição da API com Uber Fx tem seu próprio teste, `test/integration/fx_lifecycle_integration_test.go` (seção 13 do desafio): monta o `fx.App` real de `cmd/api` (via `internal/bootstrap.Module`), confirma que `Start` sobe o servidor de verdade (`GET /health/live` respondendo), e que `Stop` libera os recursos — pool do Postgres fechado e servidor HTTP não aceitando mais conexão.
 
 <img src="https://capsule-render.vercel.app/api?type=rect&color=0:0d1117,50:1f6feb,100:2ea043&height=4&section=header" width="100%" />
 

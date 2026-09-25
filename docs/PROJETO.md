@@ -44,7 +44,7 @@ Dado o prazo curto e a falta de experiência prévia em Go, a estratégia de pri
 |---|---|---|
 | Controle de concorrência na carteira | Update atômico condicionado (`UPDATE ... WHERE balance >= X`) | Evita lock global e locks explícitos no código; o próprio SQL garante a invariante de saldo em uma única ida ao banco, sem necessidade de retry loop. Mais simples de implementar e testar sob prazo curto do que lock pessimista ou otimista com versionamento. |
 | Router HTTP | `chi` | Só complementa o `net/http` (handlers continuam sendo `http.Handler` padrão), é leve e fácil de aprender para quem está aprendendo Go. `gin` traria convenções próprias fora do `net/http`; `http.ServeMux` puro foi a alternativa considerada, mas o `chi` dá subrotas e middlewares (`Recoverer`, `RequestID`) prontos. |
-| Composição da aplicação | Uber Fx, restrito a `cmd/api/main.go` | Exigido pelo desafio. Só a camada de composição conhece o Fx; `domain`, `application` e `infrastructure` continuam sem depender dele. |
+| Composição da aplicação | Uber Fx, restrito a `internal/bootstrap/api_module.go` (chamado por `cmd/api/main.go`) | Exigido pelo desafio. Só a camada de composição conhece o Fx; `domain`, `application` e `infrastructure` continuam sem depender dele. A composição mora num pacote próprio (não em `main.go`) para poder ser testada — um pacote `main` não pode ser importado por nenhum teste (seção 13 do desafio, ver seção 4.9). |
 | Validação de tokens (Keycloak) | `coreos/go-oidc` + `golang-jwt/jwt` | Padrão de mercado para validar contra um IdP OIDC real (descoberta, JWKS, assinatura, expiração). Validação manual daria mais controle, mas mais código e mais risco de erro de segurança. Ver seção 4.7 para os detalhes de implementação. |
 
 ## 4. Decisões de domínio e dados
@@ -141,7 +141,7 @@ Escrever estes testes encontrou 3 bugs reais, todos corrigidos:
 
 ### 4.6. API HTTP
 
-Implementada em `internal/interfaces/http/` (router chi, handlers, DTOs, mapeamento de erros) e composta com Uber Fx em `cmd/api/main.go`. Rotas e tabela de status também estão resumidas no README.
+Implementada em `internal/interfaces/http/` (router chi, handlers, DTOs, mapeamento de erros) e composta com Uber Fx em `internal/bootstrap/api_module.go` (chamado por `cmd/api/main.go`). Rotas e tabela de status também estão resumidas no README.
 
 | Decisão | Escolha | Por quê (resumo) |
 |---|---|---|
@@ -163,7 +163,7 @@ Implementada em `internal/interfaces/http/` (router chi, handlers, DTOs, mapeame
 
 ### 4.7. Autenticação e autorização (Keycloak/OIDC)
 
-Requisito eliminatório (seção 14 do desafio). Implementado em `internal/interfaces/http/auth_middleware.go`, composto no Fx (`cmd/api/main.go`) e provisionado no `docker compose` (`deployments/keycloak/`).
+Requisito eliminatório (seção 14 do desafio). Implementado em `internal/interfaces/http/auth_middleware.go`, composto no Fx (`internal/bootstrap/api_module.go`) e provisionado no `docker compose` (`deployments/keycloak/`).
 
 | Decisão | Escolha | Por quê (resumo) |
 |---|---|---|
@@ -199,22 +199,38 @@ Implementado em 25/09/2026, sobre a API já existente e sobre os workers. Cobre 
 
 **Verificado manualmente**: `docker compose -f deployments/docker-compose.yml up --build` com os 4 binários e a infraestrutura reais; `GET /health/ready` respondeu `200 {"status":"ready"}` com Postgres, SQS e Keycloak no ar; logs de acesso HTTP conferidos em JSON no `stdout` do container da API, incluindo `correlationId`.
 
+### 4.9. Verificação da composição Fx e do ciclo de vida (`Start`/`Stop`)
+
+Implementado em 25/09/2026, exigido explicitamente pela seção 13 do desafio: *"Adicione uma verificação da composição Fx e de seu início e encerramento, incluindo liberação de recursos dos workers."*
+
+| Decisão | Escolha | Por quê (resumo) |
+|---|---|---|
+| Onde a composição do Fx mora | Extraída de `cmd/api/main.go` para `internal/bootstrap/api_module.go`, exportada como `bootstrap.Module` (`fx.Options(...)`) | Um pacote `main` não pode ser importado por nenhum outro pacote em Go — nem por um teste. Sem mover a composição para fora de `main.go`, não havia como um teste em `test/integration/` montar o mesmo `fx.App` que roda em produção. `cmd/api/main.go` passou a ser só `fx.New(bootstrap.Module).Run()`; comportamento em produção não mudou. |
+| Onde fica o teste | `test/integration/fx_lifecycle_integration_test.go` (build tag `integration`) | Precisa de Postgres, Keycloak e SQS/LocalStack reais no ar — o mesmo `newPool`/`newTokenVerifier`/`newSQSPinger` de produção fazem chamada de rede de verdade na composição, então não roda em `go test ./...` normal. |
+| O que o teste monta | O MESMO `bootstrap.Module` de produção, com `fx.Populate` para o teste segurar uma referência ao `*pgxpool.Pool` e ao `*config.Config` montados — não uma composição simplificada nem mocks no lugar da infraestrutura | O pedido da seção 13 é verificar a composição REAL, não uma parecida. `fx.Populate` é o mecanismo do próprio Fx para "escapar" um valor do grafo de DI sem mudar a composição. |
+| O que é verificado no `Start` | `app.Start(ctx)` não retorna erro (grafo de dependências resolve, discovery OIDC contra o Keycloak funciona); o servidor HTTP aceita conexão e `GET /health/live` responde `200` | Confirma que a composição sobe de verdade, não só que o código compila. |
+| O que é verificado no `Stop` | `app.Stop(ctx)` não retorna erro; depois dele, `pool.Ping(ctx)` falha (confirma que o `OnStop` de `newPool` chamou `pool.Close()`) e a porta HTTP para de aceitar conexão (confirma que o `OnStop` de `registerHTTPServer` chamou `server.Shutdown()`) | É a parte de "liberação de recursos" pedida pela seção 13 — não basta `Stop` não dar erro, o teste confirma que os recursos foram mesmo fechados, tentando usá-los depois. |
+| Porta usada pelo servidor no teste | `8090` (não `8080`) | Evita conflito com o container `wagerflow-api` caso o desenvolvedor tenha rodado `docker compose up --build` completo e o deixado no ar enquanto roda este teste separadamente. |
+
+**Verificado pelo desenvolvedor**: `go test -tags=integration ./test/integration/... -run TestFxAppLifecycle` (ver comando completo no README), com Postgres + Keycloak + LocalStack do `docker compose` no ar.
+
 ## 5. Limitações conhecidas e trabalho não concluído
 
 > Esta seção deve ser mantida honesta e atualizada até a entrega final — é parte da nota de documentação (5 pts) e demonstra maturidade profissional, mesmo quando o item não foi feito por falta de tempo.
 
 Estado em 25/09/2026. Itens abaixo ainda **não** existem (ou estão incompletos) e serão marcados como concluídos ou como limitação na entrega:
 
-- **A camada HTTP não tem testes automatizados de handler.** A auth tem teste próprio (`auth_middleware_test.go`, seção 4.7), mas os handlers de wallet/wager (formato do JSON, mapeamento de status, isolamento de `providerId` dentro do handler, formato do cursor) ainda são conferidos só manualmente (`curl`) e indiretamente pelos testes de `application`/domínio.
+- ~~A camada HTTP não tem testes automatizados de handler~~ — **feito (sessão 017, 25/09/2026)**: `wallet_handler_test.go`, `wager_handler_test.go` e `errors_test.go` cobrem formato do JSON, mapeamento de status, isolamento de `providerId` dentro do handler e a tabela completa de `mapError`, com repositórios em memória (`fakes_http_test.go`). A auth continua com teste próprio (`auth_middleware_test.go`, seção 4.7).
 - ~~Sem teste de integração automatizado contra o Keycloak real~~ — **feito (25/09/2026)**: `test/integration/keycloak_auth_integration_test.go` (build tag `integration`) automatiza o fluxo OIDC completo — discovery, JWKS, `client_credentials`, roles, isolamento entre provedores — contra o Keycloak real, ver seção 4.7. Atende a exigência da seção 13 do desafio de rodar os testes de integração "em containers reais".
 - ~~Sem `Dockerfile` e sem a API dentro do `docker compose`~~ — **feito (25/09/2026)**: `Dockerfile` multi-stage na raiz (um build, 4 binários, escolhidos por `ARG BIN`), os 4 serviços (`api`, `outbox-publisher`, `wager-consumer`, `pending-reference-worker`) e um serviço `migrate` (imagem oficial `migrate/migrate`, roda as migrations e sai) adicionados ao `deployments/docker-compose.yml`. `docker compose -f deployments/docker-compose.yml up --build` sobe o sistema inteiro numa passada só, na ordem certa via `depends_on`/`healthcheck`/`service_completed_successfully` — **validado de ponta a ponta pelo desenvolvedor, em 3 rodadas** (achado e corrigido bug pré-existente no healthcheck do LocalStack).
 - **Publicação da outbox (`cmd/outbox-publisher`) e consumidor SQS + inbox (`cmd/wager-consumer`) estão implementados e VALIDADOS de ponta a ponta contra infraestrutura real** (sessão 012/013): testes de integração automatizados rodando `ok` via Docker contra Postgres real (`wagerflow_integration_test.go` e `wager_consumer_integration_test.go`, 13 cenários no total), e teste manual ponta a ponta confirmado contra LocalStack real — carteira criada via API gerou evento em `wagerflow-events.fifo` (publisher), e uma mensagem manual em `wager-transactions.fifo` foi processada corretamente pelo consumidor (débito aplicado no Postgres, saldo e `version` corretos).
-- **Limitação de design conhecida e aceita (outbox publisher): sem garantia de ordem por agregado sob falha.** O `Claim` do publisher (`SELECT ... FOR UPDATE SKIP LOCKED`) não impede que um evento mais recente do MESMO `aggregateId` seja publicado enquanto um evento anterior do mesmo agregado está em backoff após falha transitória — nesse cenário específico, a ordem de entrega na fila pode inverter em relação à ordem de ocorrência. Avaliado contra a seção 11 do desafio: o texto não exige ordem garantida entre eventos (exige múltiplos publishers, disputa por registros, backoff, recuperação de trabalho abandonado e preservação do `eventId` na republicação — tudo isso está implementado e testado). Decisão consciente de não corrigir agora, dado o prazo, por não ser critério eliminatório; ficaria como próxima melhoria (ex.: publicar em ordem estrita por agregado, ou usar `MessageGroupId` = `aggregateId` na fila FIFO de saída para a própria fila serializar por grupo).
+- **Limitação de design conhecida e aceita (outbox publisher): sem garantia de ordem por agregado sob falha.** O `Claim` do publisher (`SELECT ... FOR UPDATE SKIP LOCKED`) não impede que um evento mais recente do MESMO `aggregateId` seja publicado enquanto um evento anterior do mesmo agregado está em backoff após falha transitória — nesse cenário específico, a ordem de entrega na fila pode inverter em relação à ordem de ocorrência. Avaliado contra a seção 11 do desafio: o texto não exige ordem garantida entre eventos (exige múltiplos publishers, disputa por registros, backoff, recuperação de trabalho abandonado e preservação do `eventId` na republicação — tudo isso está implementado e testado). O publisher já envia com `MessageGroupId = aggregateId` (`sqs_event_publisher.go`), o que garante ordem por grupo DENTRO do que já foi enviado à fila FIFO — mas não resolve o cenário acima, porque o problema acontece ANTES do envio: é o `Claim` decidindo publicar o evento mais novo enquanto o mais antigo do mesmo agregado ainda está em backoff. Decisão consciente de não corrigir agora, dado o prazo, por não ser critério eliminatório; a melhoria futura seria mudar a ordem de seleção do `Claim` para respeitar a ordem de ocorrência por agregado (ex.: não liberar um evento novo de um agregado que já tem outro em backoff).
 - **Worker de referências pendentes (`cmd/pending-reference-worker`) implementado (25/09/2026)** — ver seção 5.2. Testado por testes unitários com fakes (4 cenários); **ainda não executado contra Postgres real** (sem teste de integração automatizado nem execução manual contra o banco de verdade — pendência conhecida, ver seção 5.2).
 - ~~`GET /health/ready` verifica só o Postgres~~ — **feito (25/09/2026)**: passou a checar também SQS e Keycloak, ver seção 4.8. A checagem do worker de referências pendentes continua fora do `ready` (não há endpoint próprio para ele).
 - ~~Sem observabilidade (logs JSON, métricas)~~ — **parcialmente feito (25/09/2026)**: logs estruturados em JSON (`log/slog`) nos 4 binários + log de acesso HTTP, ver seção 4.8. **Métricas ainda não existem** (contadores por status, duplicatas, retries, DLQ, atraso da outbox, latência, divergências de reconciliação — seção 12 do desafio). Tracing com OpenTelemetry e dashboards seguem como diferencial opcional, não feitos.
 - Os testes de integração (seção 4.5) cobrem os cenários obrigatórios da seção 13, mas não incluem ainda o teste "negativo" descrito nela — remover de propósito o `FOR UPDATE`/a condição de saldo no `WHERE` e confirmar que o teste correspondente falha. É uma checagem manual, não automatizada no CI.
 - ~~O `ARCHITECTURE.md` exigido na seção 15 do desafio ainda não existe~~ — **feito (25/09/2026)**, na raiz do repositório, com base neste `PROJETO.md`.
+- ~~Sem verificação da composição Fx e de seu início/encerramento (seção 13 do desafio)~~ — **feito (25/09/2026)**: `test/integration/fx_lifecycle_integration_test.go` monta o `fx.App` real da API (via `internal/bootstrap.Module`, extraído de `cmd/api/main.go` para ficar testável) e confirma `Start`/`Stop` e a liberação de recursos (pool do Postgres, servidor HTTP), ver seção 4.9.
 
 ## 5.1. Consumidor SQS e inbox (implementado em 24/09/2026)
 
@@ -269,6 +285,7 @@ Estado em 25/09/2026. Itens abaixo ainda **não** existem (ou estão incompletos
 - [ ] Testes de recuperação de falha e multi-instância
 - [x] `Dockerfile`, `docker compose up --build` completo, `ARCHITECTURE.md` — feito 25/09/2026, validado de ponta a ponta pelo desenvolvedor
 - [x] Observabilidade básica: logs JSON (`log/slog`, 4 binários + acesso HTTP) e `GET /health/ready` cobrindo Postgres+SQS+Keycloak — feito 25/09/2026, validado de ponta a ponta (ver seção 4.8). Métricas seguem pendentes.
+- [x] Verificação da composição Fx e de seu início/encerramento, incluindo liberação de recursos (seção 13 do desafio) — feito 25/09/2026, `test/integration/fx_lifecycle_integration_test.go` (ver seção 4.9)
 
 ---
 
