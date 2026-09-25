@@ -39,6 +39,7 @@ func (u *unitOfWork) LedgerEntries() domain.WalletLedgerEntryRepository {
 	return NewWalletLedgerEntryRepository(u.tx)
 }
 func (u *unitOfWork) Outbox() domain.OutboxRepository { return NewOutboxRepository(u.tx) }
+func (u *unitOfWork) Inbox() domain.InboxRepository   { return NewInboxRepository(u.tx) }
 
 // TxManager implementa domain.TxRunner usando transações reais do
 // Postgres via pgx.

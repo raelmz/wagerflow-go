@@ -36,6 +36,7 @@ func (u *skewedUoW) LedgerEntries() domain.WalletLedgerEntryRepository {
 	return u.inner.LedgerEntries()
 }
 func (u *skewedUoW) Outbox() domain.OutboxRepository { return u.inner.Outbox() }
+func (u *skewedUoW) Inbox() domain.InboxRepository   { return u.inner.Inbox() }
 
 func TestFindExisting_MesmaChaveVistaSoPorExternalID_EhReplay(t *testing.T) {
 	store := newMemStore()

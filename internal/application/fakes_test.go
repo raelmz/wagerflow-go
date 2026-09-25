@@ -27,12 +27,14 @@ type memStore struct {
 	txs     map[uuid.UUID]*domain.WagerTransaction
 	entries []*domain.WalletLedgerEntry
 	events  []*domain.OutboxEvent
+	inbox   map[string]string
 }
 
 func newMemStore() *memStore {
 	return &memStore{
 		wallets: map[uuid.UUID]*domain.Wallet{},
 		txs:     map[uuid.UUID]*domain.WagerTransaction{},
+		inbox:   map[string]string{},
 	}
 }
 
@@ -54,6 +56,7 @@ func (u *memUoW) LedgerEntries() domain.WalletLedgerEntryRepository {
 	return &memLedgerRepo{u.store}
 }
 func (u *memUoW) Outbox() domain.OutboxRepository { return &memOutboxRepo{u.store} }
+func (u *memUoW) Inbox() domain.InboxRepository   { return &memInboxRepo{u.store} }
 
 // --- Carteiras ---
 
@@ -241,6 +244,19 @@ type memOutboxRepo struct{ s *memStore }
 func (r *memOutboxRepo) Append(_ context.Context, e *domain.OutboxEvent) error {
 	r.s.events = append(r.s.events, e)
 	return nil
+}
+
+// --- Inbox ---
+
+type memInboxRepo struct{ s *memStore }
+
+func (r *memInboxRepo) TryInsert(_ context.Context, consumerName, messageID, payloadHash string) (bool, error) {
+	key := consumerName + "|" + messageID
+	if _, seen := r.s.inbox[key]; seen {
+		return false, nil
+	}
+	r.s.inbox[key] = payloadHash
+	return true, nil
 }
 
 // --- Auxiliares de conferência para os testes ---

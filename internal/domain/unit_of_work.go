@@ -17,6 +17,10 @@ type UnitOfWork interface {
 	// demais alterações — é isso que garante "evento só existe se o
 	// fato foi confirmado, e todo fato confirmado tem seu evento".
 	Outbox() OutboxRepository
+
+	// Inbox registra mensagens SQS recebidas NA MESMA transação do
+	// efeito financeiro que elas causam — ver InboxRepository.
+	Inbox() InboxRepository
 }
 
 // TxRunner é o que o caso de uso realmente depende — não sabe se por
