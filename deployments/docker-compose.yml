@@ -73,15 +73,153 @@ services:
       # do bash pra bater no endpoint de health da própria LocalStack
       # e confere se o SQS já está "running" ou "available" (o nome
       # do estado mudou entre versões da LocalStack).
+      #
+      # IMPORTANTE: diferente da imagem do Keycloak (onde /bin/sh já
+      # resolve para bash), a imagem da LocalStack tem /bin/sh apontando
+      # para o `dash`, que NÃO entende /dev/tcp (é recurso exclusivo do
+      # bash) — falha com "Directory nonexistent". `CMD-SHELL` sempre
+      # roda via /bin/sh, então é preciso invocar `bash -c` explicitamente
+      # aqui dentro para cair no shell certo (a imagem tem bash instalado,
+      # só não é o padrão).
       test:
         [
           "CMD-SHELL",
-          "exec 3<>/dev/tcp/127.0.0.1/4566 && echo -e 'GET /_localstack/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && grep -Eq '\"sqs\":[[:space:]]*\"(running|available)\"' <&3",
+          "bash -c 'exec 3<>/dev/tcp/127.0.0.1/4566 && echo -e \"GET /_localstack/health HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3 && grep -Eq \"\\\"sqs\\\":[[:space:]]*\\\"(running|available)\\\"\" <&3'",
         ]
       interval: 10s
       timeout: 5s
       retries: 15
       start_period: 15s
+
+  # migrate: serviço "one-shot" (roda e sai, não fica no ar) que aplica
+  # todas as migrations pendentes em migrations/ contra o Postgres do
+  # compose ANTES de qualquer binário Go subir. Usa a imagem oficial
+  # do golang-migrate (o mesmo formato de nome de arquivo que já
+  # usamos: 000001_nome.up.sql / .down.sql), então não precisa instalar
+  # nada nem escrever código extra — só apontar para a pasta e a URL do
+  # banco. `depends_on: condition: service_completed_successfully` nos
+  # serviços da aplicação garante que eles só sobem depois que este
+  # container terminar (com exit code 0).
+  migrate:
+    image: migrate/migrate:v4.18.1
+    container_name: wagerflow-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../migrations:/migrations:ro
+    command:
+      [
+        "-path",
+        "/migrations",
+        "-database",
+        "postgres://wagerflow:wagerflow@postgres:5432/wagerflow?sslmode=disable",
+        "up",
+      ]
+    restart: "no"
+
+  # api, outbox-publisher, wager-consumer e pending-reference-worker
+  # usam o MESMO Dockerfile (build multi-stage na raiz do projeto),
+  # variando só o ARG BIN — ver comentário no Dockerfile. Todos
+  # dependem do Postgres saudável e do `migrate` ter terminado com
+  # sucesso; api/consumer também dependem do Keycloak/LocalStack
+  # saudáveis quando fazem uso deles.
+  #
+  # Dentro da rede do compose, os serviços se enxergam pelo NOME do
+  # serviço (não localhost): por isso as URLs abaixo usam
+  # `postgres`/`keycloak`/`localstack`, diferente do `.env` que o
+  # desenvolvedor usa rodando os binários soltos na própria máquina
+  # (esse continua com `localhost`, para os testes manuais/`go run`
+  # feitos fora do Docker continuarem funcionando sem mudar nada).
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        BIN: api
+    container_name: wagerflow-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://wagerflow:wagerflow@postgres:5432/wagerflow?sslmode=disable
+      HTTP_PORT: "8080"
+      KEYCLOAK_ISSUER_URL: http://keycloak:8080/realms/wagerflow
+    ports:
+      - "8080:8080"
+
+  outbox-publisher:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        BIN: outbox-publisher
+    container_name: wagerflow-outbox-publisher
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://wagerflow:wagerflow@postgres:5432/wagerflow?sslmode=disable
+      SQS_ENDPOINT_URL: http://localstack:4566
+      AWS_REGION: us-east-1
+      OUTBOX_QUEUE_NAME: wagerflow-events.fifo
+      OUTBOX_POLL_INTERVAL: 2s
+      OUTBOX_BATCH_SIZE: "20"
+      OUTBOX_LOCK_TIMEOUT: 2m
+
+  wager-consumer:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        BIN: wager-consumer
+    container_name: wagerflow-wager-consumer
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://wagerflow:wagerflow@postgres:5432/wagerflow?sslmode=disable
+      SQS_ENDPOINT_URL: http://localstack:4566
+      AWS_REGION: us-east-1
+      WAGER_QUEUE_NAME: wager-transactions.fifo
+      WAGER_CONSUMER_NAME: wager-consumer
+      WAGER_MAX_RECEIVE_COUNT: "5"
+
+  pending-reference-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        BIN: pending-reference-worker
+    container_name: wagerflow-pending-reference-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://wagerflow:wagerflow@postgres:5432/wagerflow?sslmode=disable
+      PENDING_REFERENCE_POLL_INTERVAL: 2s
+      PENDING_REFERENCE_BATCH_SIZE: "20"
+      PENDING_REFERENCE_LOCK_TIMEOUT: 2m
+      PENDING_REFERENCE_MAX_ATTEMPTS: "5"
+      PENDING_REFERENCE_TTL: 5m
 
 volumes:
   wagerflow_postgres_data:

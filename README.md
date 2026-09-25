@@ -121,37 +121,40 @@ wagerflow-go/
 <a id="como-rodar"></a>
 ## ⚙️ Como rodar
 
+A forma recomendada é subir **tudo** (Postgres, Keycloak, LocalStack, migrations e os 4 binários Go) com um único comando:
+
 ```bash
 git clone https://github.com/raelmz/wagerflow-go.git
 cd wagerflow-go
 cp .env.example .env
-docker compose -f deployments/docker-compose.yml up -d   # Postgres + Keycloak (LocalStack entra na próxima etapa)
+docker compose -f deployments/docker-compose.yml up --build
 ```
 
-> **Estado atual**: a API HTTP já sobe (`go run ./cmd/api`) com autenticação real via Keycloak. `cmd/smoketest` é uma ferramenta descartável de conferência manual, não faz parte da aplicação final.
+Isso sobe, nesta ordem (o `depends_on`/`healthcheck` de cada serviço garante a ordem certa sozinho):
 
-O Keycloak demora um pouco mais que o Postgres para ficar pronto na primeira vez (baixa a imagem e importa o realm). Confira com `docker ps` até os dois containers aparecerem como `healthy`.
+1. `postgres`, `keycloak`, `localstack` — sobem em paralelo, cada um até ficar `healthy`.
+2. `migrate` — aplica todas as migrations pendentes de `migrations/` contra o Postgres do compose e **termina** (não fica no ar). Usa a imagem oficial `migrate/migrate`, não precisa instalar nada.
+3. `api`, `outbox-publisher`, `wager-consumer`, `pending-reference-worker` — os 4 binários do projeto, cada um construído a partir do `Dockerfile` na raiz do repositório (mesmo Dockerfile para os 4, variando só o binário copiado — ver comentários no arquivo). Todos só sobem depois do `migrate` terminar com sucesso.
 
-As migrations em `migrations/` são aplicadas manualmente, uma de cada vez, contra o Postgres do `docker compose` acima (**antes** de subir a API):
-
-```bash
-docker exec -i wagerflow-postgres psql -U wagerflow -d wagerflow < migrations/000001_create_wallets_table.up.sql
-docker exec -i wagerflow-postgres psql -U wagerflow -d wagerflow < migrations/000002_create_wager_transactions_table.up.sql
-docker exec -i wagerflow-postgres psql -U wagerflow -d wagerflow < migrations/000003_create_wallet_ledger_entries_table.up.sql
-docker exec -i wagerflow-postgres psql -U wagerflow -d wagerflow < migrations/000004_create_inbox_outbox_tables.up.sql
-docker exec -i wagerflow-postgres psql -U wagerflow -d wagerflow < migrations/000005_wager_reference_and_result.up.sql
-docker exec -i wagerflow-postgres psql -U wagerflow -d wagerflow < migrations/000006_ledger_prevent_truncate.up.sql
-```
-
-Depois das migrations, suba a API (o `.env` é carregado automaticamente; `DATABASE_URL` é obrigatória e `HTTP_PORT` tem padrão `8080`):
-
-```bash
-go run ./cmd/api
-```
+Primeira vez demora mais (build das imagens Go + download de Postgres/Keycloak/LocalStack). Acompanhe os logs no próprio terminal; `Ctrl+C` derruba tudo. Para rodar em segundo plano, use `up --build -d` e `docker compose -f deployments/docker-compose.yml logs -f <serviço>` para acompanhar um serviço específico.
 
 ```bash
 curl http://localhost:8080/health/live
 ```
+
+> As filas SQS (`wagerflow-events.fifo`, `wager-transactions.fifo`) não são criadas pelo compose: o próprio `outbox-publisher`/`wager-consumer` as cria (via `CreateQueue`, idempotente) na primeira vez que rodam contra o LocalStack.
+
+**Rodando fora do Docker** (útil para debugar um binário isolado com `go run`, ou testar com `-race`): suba só a infra —
+
+```bash
+docker compose -f deployments/docker-compose.yml up -d postgres keycloak localstack
+./deployments/migrate.sh up
+go run ./cmd/api
+```
+
+Nesse caso o `.env` já tem `DATABASE_URL`/`KEYCLOAK_ISSUER_URL`/`SQS_ENDPOINT_URL` apontando para `localhost` (as portas publicadas pelo compose), diferente das variáveis internas (`postgres`, `keycloak`, `localstack`) que os serviços `api`/`outbox-publisher`/`wager-consumer`/`pending-reference-worker` usam quando rodam DENTRO do compose — cada ambiente enxerga a infra pelo nome que faz sentido para ele.
+
+`cmd/smoketest` é uma ferramenta descartável de conferência manual, não faz parte da aplicação final e não tem serviço próprio no compose.
 
 <a id="autenticação"></a>
 ## 🔐 Autenticação
