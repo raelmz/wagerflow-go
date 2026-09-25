@@ -309,9 +309,22 @@ MSYS_NO_PATHCONV=1 docker run --rm --network deployments_default \
   -e TEST_DATABASE_URL="postgres://wagerflow:wagerflow@wagerflow-postgres:5432/postgres?sslmode=disable" \
   -v "$(pwd -W):/app" -w /app golang:1.27 \
   go test -tags=integration -race ./test/integration/...
+
+# Teste de integração contra o Keycloak REAL (mesma build tag
+# "integration"; precisa do serviço "keycloak" do docker compose de
+# pé, não só do Postgres). Sem variável nenhuma, se rodado direto na
+# máquina (usa a porta 8081 publicada no host por padrão):
+go test -tags=integration ./test/integration/... -run TestKeycloakAuth
+
+# No Windows (Git Bash), pelo container, na mesma rede do compose —
+# aqui a porta é a INTERNA do Keycloak (8080), não a 8081 publicada:
+MSYS_NO_PATHCONV=1 docker run --rm --network deployments_default \
+  -e TEST_KEYCLOAK_ISSUER_URL="http://wagerflow-keycloak:8080/realms/wagerflow" \
+  -v "$(pwd -W):/app" -w /app golang:1.27 \
+  go test -tags=integration ./test/integration/... -run TestKeycloakAuth
 ```
 
-> ⚠️ A camada HTTP (`internal/interfaces/http`) ainda **não tem testes automatizados de handler** (wallet/wager): hoje é coberta só indiretamente (casos de uso e integração) e por conferência manual. O middleware de autenticação/autorização é exceção — tem teste próprio (`auth_middleware_test.go`), com um `TokenVerifier` fake, sem precisar do Keycloak real.
+A camada HTTP (`internal/interfaces/http`) tem testes automatizados de handler desde a sessão 017 (`wallet_handler_test.go`/`wager_handler_test.go`/`errors_test.go`, com repositórios em memória). O middleware de autenticação/autorização tem dois níveis de teste: `auth_middleware_test.go` cobre a lógica de decisão com um `TokenVerifier` fake (rápido, sem Docker), e `test/integration/keycloak_auth_integration_test.go` (build tag `integration`) automatiza o fluxo OIDC completo contra um Keycloak real — os 5 cenários que antes só eram validados manualmente com `curl` (sem token, token inválido, token de cada provedor com sua própria identidade, isolamento entre `provider` e `internal`).
 
 <img src="https://capsule-render.vercel.app/api?type=rect&color=0:0d1117,50:1f6feb,100:2ea043&height=4&section=header" width="100%" />
 
