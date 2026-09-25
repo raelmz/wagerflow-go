@@ -56,8 +56,32 @@ services:
       retries: 15
       start_period: 30s
 
-  # LocalStack (SQS) entra aqui num próximo passo (item 3 da seção 5
-  # do contexto de sessão), quando implementarmos mensageria.
+  # LocalStack (SQS) — destino dos eventos de saída da outbox (seção
+  # 11 do desafio) e, no próximo passo, a fila de entrada do
+  # consumidor. SERVICES=sqs mantém a imagem enxuta, sem subir todo o
+  # resto da AWS que a LocalStack sabe simular e que não usamos.
+  localstack:
+    image: localstack/localstack:3.8
+    container_name: wagerflow-localstack
+    restart: unless-stopped
+    environment:
+      SERVICES: sqs
+    ports:
+      - "4566:4566"
+    healthcheck:
+      # Mesmo truque do Keycloak (sem curl na imagem): usa o /dev/tcp
+      # do bash pra bater no endpoint de health da própria LocalStack
+      # e confere se o SQS já está "running" ou "available" (o nome
+      # do estado mudou entre versões da LocalStack).
+      test:
+        [
+          "CMD-SHELL",
+          "exec 3<>/dev/tcp/127.0.0.1/4566 && echo -e 'GET /_localstack/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && grep -Eq '\"sqs\":[[:space:]]*\"(running|available)\"' <&3",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
 
 volumes:
   wagerflow_postgres_data:
