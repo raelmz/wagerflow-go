@@ -144,12 +144,16 @@ services:
         condition: service_healthy
       keycloak:
         condition: service_healthy
+      localstack:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     environment:
       DATABASE_URL: postgres://wagerflow:wagerflow@postgres:5432/wagerflow?sslmode=disable
       HTTP_PORT: "8080"
       KEYCLOAK_ISSUER_URL: http://keycloak:8080/realms/wagerflow
+      SQS_ENDPOINT_URL: http://localstack:4566
+      AWS_REGION: us-east-1
     ports:
       - "8080:8080"
 

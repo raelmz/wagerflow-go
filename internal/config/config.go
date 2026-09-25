@@ -22,6 +22,15 @@ type Config struct {
 	// /.well-known/openid-configuration), então não precisamos de
 	// mais nenhuma variável de ambiente para achar as chaves públicas.
 	KeycloakIssuerURL string
+
+	// SQSEndpointURL e AWSRegion são usados só pelo GET /health/ready
+	// (seção 9 do desafio: readiness precisa cobrir Postgres E SQS,
+	// não só o banco). A API não publica nem consome mensagens
+	// diretamente — quem faz isso são os outros 3 binários —, então
+	// aqui essas variáveis só existem para montar um client de
+	// "ping" contra o SQS/LocalStack.
+	SQSEndpointURL string
+	AWSRegion      string
 }
 
 // Load lê as variáveis de ambiente obrigatórias e aplica defaults às
@@ -39,6 +48,16 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("variável de ambiente KEYCLOAK_ISSUER_URL é obrigatória")
 	}
 
+	sqsEndpointURL := os.Getenv("SQS_ENDPOINT_URL")
+	if sqsEndpointURL == "" {
+		return nil, fmt.Errorf("variável de ambiente SQS_ENDPOINT_URL é obrigatória")
+	}
+
+	region := os.Getenv("AWS_REGION")
+	if region == "" {
+		region = "us-east-1"
+	}
+
 	port := os.Getenv("HTTP_PORT")
 	if port == "" {
 		port = "8080"
@@ -48,5 +67,7 @@ func Load() (*Config, error) {
 		DatabaseURL:       databaseURL,
 		HTTPPort:          port,
 		KeycloakIssuerURL: keycloakIssuerURL,
+		SQSEndpointURL:    sqsEndpointURL,
+		AWSRegion:         region,
 	}, nil
 }

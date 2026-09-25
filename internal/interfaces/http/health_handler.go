@@ -5,45 +5,82 @@ import (
 	"net/http"
 )
 
-// pinger é satisfeito por *pgxpool.Pool (main.go injeta o pool real),
-// mas o handler não precisa importar pgx só para checar saúde —
-// mantém este pacote livre de conhecer o driver específico do banco.
-type pinger interface {
+// DBPinger, SQSPinger e KeycloakPinger são três interfaces
+// estruturalmente IDÊNTICAS (todas só exigem Ping(ctx) error), mas
+// declaradas em separado de propósito: é assim que o Uber Fx — que
+// resolve cada parâmetro de construtor pelo TIPO declarado, não pelo
+// formato — consegue diferenciar "o pinger do Postgres" do "pinger
+// do SQS" e do "pinger do Keycloak" na hora de montar o
+// HealthHandler. Ver cmd/api/main.go (newDBPinger/newSQSPinger/
+// newKeycloakPinger), que é quem devolve cada um desses tipos.
+type DBPinger interface {
+	Ping(ctx context.Context) error
+}
+
+type SQSPinger interface {
+	Ping(ctx context.Context) error
+}
+
+type KeycloakPinger interface {
 	Ping(ctx context.Context) error
 }
 
 // HealthHandler implementa GET /health/live e GET /health/ready
 // (seção 9 do desafio).
 type HealthHandler struct {
-	db pinger
-	// sqs fica reservado para quando o consumidor SQS existir (item 3
-	// da seção 5 do contexto de sessão) — readiness também deve
-	// checar a fila, não só o Postgres.
+	db       DBPinger
+	sqs      SQSPinger
+	keycloak KeycloakPinger
 }
 
-func NewHealthHandler(db pinger) *HealthHandler {
-	return &HealthHandler{db: db}
+func NewHealthHandler(db DBPinger, sqs SQSPinger, keycloak KeycloakPinger) *HealthHandler {
+	return &HealthHandler{db: db, sqs: sqs, keycloak: keycloak}
 }
 
 // Live é liveness pura do processo: se o handler responde, o
 // processo está vivo. Não depende de nenhuma dependência externa —
-// caso contrário, um Postgres fora do ar derrubaria o orquestrador
-// reiniciando o processo à toa, quando na verdade é o BANCO que está
-// indisponível, não a aplicação.
+// caso contrário, um Postgres (ou SQS, ou Keycloak) fora do ar
+// derrubaria o orquestrador reiniciando o processo à toa, quando na
+// verdade é uma DEPENDÊNCIA que está indisponível, não a aplicação
+// em si.
 func (h *HealthHandler) Live(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "live"})
 }
 
-// Ready confirma que as dependências externas (Postgres, e no futuro
-// SQS) estão alcançáveis. Só aqui um problema de infraestrutura deve
-// tirar a instância de trás do load balancer.
+// Ready confirma que TODAS as dependências externas que a aplicação
+// precisa para funcionar — Postgres, SQS e Keycloak — estão
+// alcançáveis. Só aqui um problema de infraestrutura deve tirar a
+// instância de trás do load balancer.
+//
+// Checa as três mesmo se a primeira já falhar (em vez de parar no
+// primeiro erro) e devolve TODAS as que falharam de uma vez: é mais
+// fácil diagnosticar "Postgres E Keycloak fora do ar" lendo uma
+// resposta só do que precisando bater no endpoint várias vezes até
+// a dependência anterior ser corrigida.
 func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
-	if err := h.db.Ping(r.Context()); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"status": "not ready",
-			"reason": "postgres indisponível",
+	checks := []struct {
+		name string
+		ping func(context.Context) error
+	}{
+		{"postgres", h.db.Ping},
+		{"sqs", h.sqs.Ping},
+		{"keycloak", h.keycloak.Ping},
+	}
+
+	failures := map[string]string{}
+	for _, check := range checks {
+		if err := check.ping(r.Context()); err != nil {
+			failures[check.name] = err.Error()
+		}
+	}
+
+	if len(failures) > 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status":  "not ready",
+			"reasons": failures,
 		})
 		return
 	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }

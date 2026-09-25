@@ -17,6 +17,7 @@ import (
 	"github.com/raelmz/wagerflow-go/internal/application"
 	"github.com/raelmz/wagerflow-go/internal/config"
 	"github.com/raelmz/wagerflow-go/internal/domain"
+	"github.com/raelmz/wagerflow-go/internal/infrastructure/messaging"
 	"github.com/raelmz/wagerflow-go/internal/infrastructure/postgres"
 	wfhttp "github.com/raelmz/wagerflow-go/internal/interfaces/http"
 	"github.com/raelmz/wagerflow-go/internal/observability"
@@ -39,6 +40,9 @@ func main() {
 			newWagerTransactionRepository,
 			newWalletLedgerEntryRepository,
 			newTokenVerifier,
+			newDBPinger,
+			newSQSPinger,
+			newKeycloakPinger,
 
 			application.NewOpenWalletUseCase,
 			application.NewGetWalletUseCase,
@@ -122,8 +126,33 @@ func newWalletLedgerEntryRepository(pool *pgxpool.Pool) domain.WalletLedgerEntry
 	return postgres.NewWalletLedgerEntryRepository(pool)
 }
 
-func newHealthHandler(pool *pgxpool.Pool) *wfhttp.HealthHandler {
-	return wfhttp.NewHealthHandler(pool)
+func newHealthHandler(db wfhttp.DBPinger, sqs wfhttp.SQSPinger, keycloak wfhttp.KeycloakPinger) *wfhttp.HealthHandler {
+	return wfhttp.NewHealthHandler(db, sqs, keycloak)
+}
+
+// newDBPinger devolve o próprio pool do Postgres como implementação
+// de wfhttp.DBPinger — *pgxpool.Pool já tem um método Ping(ctx)
+// error, então não precisa de nenhum wrapper. Declarar o RETORNO
+// desta função como a interface wfhttp.DBPinger (em vez do tipo
+// concreto *pgxpool.Pool) é o que permite o Fx diferenciar este
+// provider dos outros dois pingers abaixo — os três têm o mesmo
+// formato (só Ping(ctx) error), mas tipos Go diferentes.
+func newDBPinger(pool *pgxpool.Pool) wfhttp.DBPinger {
+	return pool
+}
+
+// newSQSPinger monta o pinger de conectividade com o SQS/LocalStack
+// para o /health/ready. Não faz chamada de rede aqui — só na hora do
+// Ping — então não atrasa (nem depende de) o boot da API.
+func newSQSPinger(cfg *config.Config) wfhttp.SQSPinger {
+	return messaging.NewSQSPinger(cfg.SQSEndpointURL, cfg.AWSRegion)
+}
+
+// newKeycloakPinger monta o pinger de conectividade com o Keycloak
+// para o /health/ready, a partir da MESMA issuer URL que
+// newTokenVerifier já usa para o discovery OIDC.
+func newKeycloakPinger(cfg *config.Config) wfhttp.KeycloakPinger {
+	return wfhttp.NewKeycloakPinger(cfg.KeycloakIssuerURL)
 }
 
 // registerHTTPServer sobe o servidor HTTP num goroutine (OnStart não
